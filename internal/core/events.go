@@ -50,6 +50,7 @@ type Tapback struct {
 
 // Edit is a sent message's new text.
 type Edit struct {
+	RowID    int64
 	GUID     string
 	ChatGUID string
 	Sender   string
@@ -131,7 +132,7 @@ func toEvent(m imsg.Message) Event {
 	case m.Type == "unsent" || (m.Type == "edited" && text == "" && len(m.Attachments) == 0):
 		return Unsend{GUID: m.GUID, ChatGUID: m.ChatGUID, Sender: m.Sender, IsFromMe: m.IsFromMe, Time: m.CreatedAt}
 	case m.Type == "edited":
-		return Edit{GUID: m.GUID, ChatGUID: m.ChatGUID, Sender: m.Sender, IsFromMe: m.IsFromMe, Text: text, Time: m.CreatedAt}
+		return Edit{RowID: m.ID, GUID: m.GUID, ChatGUID: m.ChatGUID, Sender: m.Sender, IsFromMe: m.IsFromMe, Text: text, Time: m.CreatedAt}
 	case m.IsReaction:
 		emoji := m.ReactionEmoji
 		if classic, ok := classicTapbacks[m.ReactionType]; ok {

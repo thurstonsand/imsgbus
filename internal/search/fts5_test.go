@@ -2,6 +2,7 @@ package search_test
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -110,6 +111,24 @@ func TestChatAndDateFilters(t *testing.T) {
 	}
 }
 
+func TestSenderFilters(t *testing.T) {
+	mine := doc(4, "chat-a", 40, "dinner was great")
+	mine.IsFromMe = true
+	b := backend(t,
+		doc(1, "chat-a", 10, "dinner at eight"),
+		doc(2, "chat-b", 20, "dinner tomorrow"),
+		doc(3, "chat-a", 30, "dinner again"),
+		mine,
+	)
+	// doc gives row N the sender +155501000N.
+	if got := rows(t, b, search.Query{Text: "dinner", From: []string{"+1555010001", "+1555010003"}}); !slices.Equal(got, []int64{3, 1}) {
+		t.Errorf("from two handles = %v; want 3, 1", got)
+	}
+	if got := rows(t, b, search.Query{Text: "dinner", FromMe: true}); !slices.Equal(got, []int64{4}) {
+		t.Errorf("from me = %v; want 4", got)
+	}
+}
+
 func TestCursorPagesThroughEveryHitOnce(t *testing.T) {
 	var docs []search.Document
 	for row := int64(1); row <= 23; row++ {
@@ -166,5 +185,17 @@ func TestReindexingReplacesTheRow(t *testing.T) {
 	}
 	if got := rows(t, b, search.Query{Text: "library"}); len(got) != 0 {
 		t.Errorf("library = %v; want nothing once removed", got)
+	}
+}
+
+func TestOpensARelativePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f, err := search.OpenFTS5("search.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if _, err := os.Stat("search.db"); err != nil {
+		t.Fatalf("index is not at ./search.db: %v", err)
 	}
 }

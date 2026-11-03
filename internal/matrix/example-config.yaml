@@ -1,3 +1,9 @@
 # The imsg executable whose `imsg rpc` child drives Messages. Run `imsg launch` once after every
 # Messages restart so its helper is injected.
 imsg_path: /usr/local/bin/imsg
+# The SQLite file of the message search index; imsgbus builds it from Messages on first start.
+search_index: search.db
+# The MCP server for agents: Streamable HTTP on this address, behind this bearer token.
+mcp:
+    listen: 127.0.0.1:7380
+    token: generate

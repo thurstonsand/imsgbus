@@ -17,8 +17,9 @@ type Chat struct {
 	Participants []string `json:"participants"`
 	AccountID    string   `json:"account_id"`
 	LastHandle   string   `json:"last_addressed_handle"`
-	// LastMessage is set by chats.list only.
+	// LastMessage and Unread are set by chats.list only.
 	LastMessage time.Time `json:"last_message_at"`
+	Unread      int       `json:"unread_count"`
 }
 
 // Message is imsg's message object, from history and watch.
@@ -101,13 +102,36 @@ type ErrorNotification struct {
 	} `json:"error"`
 }
 
-// ChatsList returns the most recently active chats.
-func (c *Client) ChatsList(ctx context.Context, limit int) ([]Chat, error) {
+// ChatsList returns the most recently active chats, or only those with unread messages.
+func (c *Client) ChatsList(ctx context.Context, limit int, unreadOnly bool) ([]Chat, error) {
 	var result struct {
 		Chats []Chat `json:"chats"`
 	}
-	err := c.Call(ctx, "chats.list", map[string]any{"limit": limit}, &result)
+	err := c.Call(ctx, "chats.list", map[string]any{"limit": limit, "unread_only": unreadOnly}, &result)
 	return result.Chats, err
+}
+
+// ChatsCreate starts a chat with the given addresses by sending it text, and returns the chat's
+// GUID and the message's.
+func (c *Client) ChatsCreate(ctx context.Context, addresses []string, text string) (chatGUID, messageGUID string, err error) {
+	var result struct {
+		ChatGUID    string `json:"chat_guid"`
+		MessageGUID string `json:"message_guid"`
+	}
+	err = c.Call(ctx, "chats.create", map[string]any{"addresses": addresses, "text": text}, &result)
+	return result.ChatGUID, result.MessageGUID, err
+}
+
+// MessagesAfter returns up to limit messages after a row, across all chats in row order, and the
+// cursor to continue from, which can be past the last message returned.
+func (c *Client) MessagesAfter(ctx context.Context, sinceRowID int64, limit int) (messages []Message, next int64, more bool, err error) {
+	var result struct {
+		Messages []Message `json:"messages"`
+		Next     int64     `json:"next_rowid"`
+		More     bool      `json:"has_more"`
+	}
+	err = c.Call(ctx, "messages.after", map[string]any{"since_rowid": sinceRowID, "limit": limit}, &result)
+	return result.Messages, result.Next, result.More, err
 }
 
 // History returns a chat's newest messages, newest first, by the chat's row ID. A non-zero start
@@ -138,17 +162,17 @@ func (c *Client) ChatsGet(ctx context.Context, chatID int64) (Chat, error) {
 	return chat, err
 }
 
-// WatchSubscribe streams new rows after sinceRowID (0 starts at the current tail), with their
-// attachments and tapbacks, and edits and unsends of earlier rows, as notifications to the
-// client's handler, and returns the subscription ID.
-func (c *Client) WatchSubscribe(ctx context.Context, sinceRowID int64) (int64, error) {
+// WatchSubscribe streams new rows after sinceRowID (0 starts at the current tail) with their
+// tapbacks, and edits and unsends of earlier rows, as notifications to the client's handler, and
+// returns the subscription ID. withFiles adds attachments, converted to formats anything can show.
+func (c *Client) WatchSubscribe(ctx context.Context, sinceRowID int64, withFiles bool) (int64, error) {
 	var result struct {
 		Subscription int64 `json:"subscription"`
 	}
 	err := c.Call(ctx, "watch.subscribe", map[string]any{
 		"since_rowid":         sinceRowID,
-		"attachments":         true,
-		"convert_attachments": true,
+		"attachments":         withFiles,
+		"convert_attachments": withFiles,
 		"include_reactions":   true,
 		"buffer_limit":        4096,
 	}, &result)

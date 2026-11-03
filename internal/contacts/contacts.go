@@ -99,7 +99,7 @@ func Open(ctx context.Context, dir string) (*Catalog, error) {
 func (c *Catalog) Name(handle string) (string, bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
-	owners := c.owners[normalize(handle)]
+	owners := c.owners[Normalize(handle)]
 	if len(owners) != 1 {
 		return "", false
 	}
@@ -317,7 +317,7 @@ func readHandles(ctx context.Context, tx *sql.Tx, query string, cards []card, in
 		if inner, ok := strings.CutPrefix(label, "_$!<"); ok {
 			label = strings.ToLower(strings.TrimSuffix(inner, ">!$_"))
 		}
-		if value = normalize(value); value != "" {
+		if value = Normalize(value); value != "" {
 			cards[i].handles = append(cards[i].handles, Handle{Value: value, Label: label})
 		}
 	}
@@ -403,9 +403,9 @@ func fold(name string) string {
 	return strings.Join(strings.Fields(strings.ToLower(stripped)), " ")
 }
 
-// normalize writes a handle the way iMessage does: an email lowercased, a phone number in E.164,
+// Normalize writes a handle the way iMessage does: an email lowercased, a phone number in E.164,
 // read as a US number when it has no country code.
-func normalize(handle string) string {
+func Normalize(handle string) string {
 	handle = strings.TrimSpace(handle)
 	if strings.Contains(handle, "@") {
 		return strings.ToLower(handle)

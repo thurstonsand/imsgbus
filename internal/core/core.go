@@ -16,7 +16,9 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/thurstonsand/imsgbus/internal/chatdb"
+	"github.com/thurstonsand/imsgbus/internal/contacts"
 	"github.com/thurstonsand/imsgbus/internal/imsg"
+	"github.com/thurstonsand/imsgbus/internal/search"
 )
 
 // Chat is one conversation. Participants excludes this account.
@@ -26,6 +28,8 @@ type Chat struct {
 	IsGroup      bool
 	Participants []string
 	LastMessage  time.Time
+	// Unread is set by RecentChats and UnreadChats only.
+	Unread int
 }
 
 func toChat(c imsg.Chat) Chat {
@@ -34,7 +38,7 @@ func toChat(c imsg.Chat) Chat {
 		// chats.get has no display_name, and both name an unnamed chat by its identifier.
 		name = c.Name
 	}
-	return Chat{GUID: c.GUID, Name: name, IsGroup: c.IsGroup, Participants: c.Participants, LastMessage: c.LastMessage}
+	return Chat{GUID: c.GUID, Name: strings.TrimSpace(name), IsGroup: c.IsGroup, Participants: c.Participants, LastMessage: c.LastMessage, Unread: c.Unread}
 }
 
 // Account is the Apple Account Messages is signed in to.
@@ -43,11 +47,21 @@ type Account struct {
 	Handle string
 }
 
+// Options is what a Service runs on.
+type Options struct {
+	IMsgPath string
+	ChatDB   string
+	Contacts *contacts.Catalog
+	Search   search.Backend
+}
+
 // Service is the single owner of the `imsg rpc` child.
 type Service struct {
-	log    zerolog.Logger
-	client *imsg.Client
-	chatDB string
+	log      zerolog.Logger
+	client   *imsg.Client
+	chatDB   string
+	contacts *contacts.Catalog
+	search   search.Backend
 
 	lock  sync.Mutex
 	chats map[string]Chat
@@ -73,16 +87,18 @@ type queue struct {
 func newQueue() *queue { return &queue{wake: make(chan struct{}, 1)} }
 
 // Start spawns imsg.
-func Start(log zerolog.Logger, imsgPath, chatDB string) (*Service, error) {
+func Start(log zerolog.Logger, opts Options) (*Service, error) {
 	s := &Service{
-		log:     log,
-		chatDB:  chatDB,
-		chats:   make(map[string]Chat),
-		chatIDs: make(map[string]int64),
-		names:   make(map[string]string),
-		queues:  make(map[int64]*queue),
+		log:      log,
+		chatDB:   opts.ChatDB,
+		contacts: opts.Contacts,
+		search:   opts.Search,
+		chats:    make(map[string]Chat),
+		chatIDs:  make(map[string]int64),
+		names:    make(map[string]string),
+		queues:   make(map[int64]*queue),
 	}
-	client, err := imsg.Start(log.With().Str("component", "imsg").Logger(), imsgPath, s.notify)
+	client, err := imsg.Start(log.With().Str("component", "imsg").Logger(), opts.IMsgPath, s.notify)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +114,7 @@ func (s *Service) Err() error { return s.client.Err() }
 
 // Account reports the Apple Account of the most recently active chat that names one.
 func (s *Service) Account(ctx context.Context) (Account, error) {
-	chats, err := s.client.ChatsList(ctx, 20)
+	chats, err := s.client.ChatsList(ctx, 20, false)
 	if err != nil {
 		return Account{}, err
 	}
@@ -118,19 +134,22 @@ func (e *OverflowError) Error() string {
 }
 
 // Watch calls handle for every new message or tapback after sinceRowID, or from now when it is 0,
-// and every edit and unsend from now, until ctx ends, imsg dies, or the watch overflows or fails.
+// and every edit and unsend from now, with attachments when withFiles is set, until ctx ends, imsg dies, or the watch overflows or fails.
 // Edits and unsends made while nothing watched are lost.
-func (s *Service) Watch(ctx context.Context, sinceRowID int64, handle func(Event)) error {
-	id, err := s.client.WatchSubscribe(ctx, sinceRowID)
+func (s *Service) Watch(ctx context.Context, sinceRowID int64, withFiles bool, handle func(Event)) error {
+	id, err := s.client.WatchSubscribe(ctx, sinceRowID, withFiles)
 	if err != nil {
 		return err
 	}
+	// Each watch tells its own handler about a group changing, so it compares against what it
+	// has seen itself.
+	seen := map[string]Chat{}
 	return s.pump(ctx, id, func(n notification) error {
 		var m imsg.MessageNotification
 		if err := json.Unmarshal(n.params, &m); err != nil {
 			return fmt.Errorf("decode watch message: %w", err)
 		}
-		if change, changed := s.remember(m.Message); changed {
+		if change, changed := s.remember(m.Message, seen); changed {
 			handle(change)
 		}
 		handle(toEvent(m.Message))
@@ -319,7 +338,7 @@ const allChats = 100000
 
 // RecentChats returns the chats with a message since the given time, newest first.
 func (s *Service) RecentChats(ctx context.Context, since time.Time) ([]Chat, error) {
-	chats, err := s.client.ChatsList(ctx, allChats)
+	chats, err := s.client.ChatsList(ctx, allChats, false)
 	if err != nil {
 		return nil, err
 	}
@@ -335,8 +354,24 @@ func (s *Service) RecentChats(ctx context.Context, since time.Time) ([]Chat, err
 	return recent, nil
 }
 
+// UnreadChats returns the chats with unread messages, newest first.
+func (s *Service) UnreadChats(ctx context.Context) ([]Chat, error) {
+	chats, err := s.client.ChatsList(ctx, allChats, true)
+	if err != nil {
+		return nil, err
+	}
+	unread := make([]Chat, 0, len(chats))
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	for _, c := range chats {
+		s.learn(c)
+		unread = append(unread, toChat(c))
+	}
+	return unread, nil
+}
+
 func (s *Service) refreshChats(ctx context.Context) error {
-	chats, err := s.client.ChatsList(ctx, allChats)
+	chats, err := s.client.ChatsList(ctx, allChats, false)
 	if err != nil {
 		return err
 	}
@@ -401,14 +436,48 @@ func (s *Service) Unsend(ctx context.Context, chatGUID, guid string) error {
 	return s.client.Unsend(ctx, chatGUID, guid)
 }
 
-// Name is the contact name last seen for a handle, or the handle itself.
+// Name is the contact's name for a handle, or the handle itself for someone not in Contacts.
 func (s *Service) Name(handle string) string {
+	if name, ok := s.contacts.Name(handle); ok {
+		return name
+	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	if name, ok := s.names[handle]; ok {
 		return name
 	}
 	return handle
+}
+
+// ContactName is the name of the one contact a handle belongs to.
+func (s *Service) ContactName(handle string) (string, bool) {
+	return s.contacts.Name(handle)
+}
+
+// Person finds the one contact a name means; see contacts.Catalog.Resolve.
+func (s *Service) Person(name string) (contacts.Contact, error) {
+	return s.contacts.Resolve(name)
+}
+
+// Search finds messages; see search.Backend.
+func (s *Service) Search(ctx context.Context, q search.Query) (search.Results, error) {
+	return s.search.Search(ctx, q)
+}
+
+// MessageChat returns the GUID of the chat a message is in, and the message's files.
+func (s *Service) MessageChat(ctx context.Context, guid string) (string, []chatdb.File, error) {
+	return chatdb.MessageChat(ctx, s.chatDB, guid)
+}
+
+// StartChat starts a chat with one address by sending it text, and returns the chat's GUID and
+// the message's.
+func (s *Service) StartChat(ctx context.Context, address, text string) (chatGUID, messageGUID string, err error) {
+	return s.client.ChatsCreate(ctx, []string{address}, text)
+}
+
+// MarkRead marks every message in a chat read.
+func (s *Service) MarkRead(ctx context.Context, chatGUID string) error {
+	return s.client.Read(ctx, chatGUID)
 }
 
 // readCheckDepth is how far back MarkReadThrough looks for the receipted message.
@@ -474,7 +543,7 @@ func (s *Service) notify(method string, params json.RawMessage) {
 
 // remember records what a watched row says about its chat and sender, and returns the chat as it
 // is now when its name or members differ from what was known.
-func (s *Service) remember(m imsg.Message) (ChatChange, bool) {
+func (s *Service) remember(m imsg.Message, seen map[string]Chat) (ChatChange, bool) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	s.chatIDs[m.ChatGUID] = m.ChatID
@@ -484,14 +553,15 @@ func (s *Service) remember(m imsg.Message) (ChatChange, bool) {
 	if !m.IsGroup {
 		return ChatChange{}, false
 	}
-	known, ok := s.chats[m.ChatGUID]
+	known, ok := seen[m.ChatGUID]
 	name := m.ChatName
 	if name == m.ChatIdent {
 		// imsg names an unnamed chat by its identifier.
 		name = ""
 	}
-	now := Chat{GUID: m.ChatGUID, Name: name, IsGroup: true, Participants: m.Participants, LastMessage: m.CreatedAt}
+	now := Chat{GUID: m.ChatGUID, Name: strings.TrimSpace(name), IsGroup: true, Participants: m.Participants, LastMessage: m.CreatedAt}
 	s.chats[m.ChatGUID] = now
+	seen[m.ChatGUID] = now
 	if !ok || (known.Name == now.Name && slices.Equal(known.Participants, now.Participants)) {
 		return ChatChange{}, false
 	}

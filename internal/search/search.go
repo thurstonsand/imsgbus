@@ -23,10 +23,12 @@ type Document struct {
 type Query struct {
 	Text     string
 	ChatGUID string
-	Sender   string
-	Since    time.Time
-	Before   time.Time
-	Limit    int
+	// From keeps messages sent from any of these handles; FromMe keeps the account's own.
+	From   []string
+	FromMe bool
+	Since  time.Time
+	Before time.Time
+	Limit  int
 	// Cursor continues an earlier search from its Results.Next.
 	Cursor string
 }

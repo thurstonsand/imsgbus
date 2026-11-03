@@ -3,10 +3,12 @@ package search
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -53,13 +55,18 @@ var _ Backend = (*FTS5)(nil)
 
 // OpenFTS5 opens the index at path, creating it if needed.
 func OpenFTS5(path string) (*FTS5, error) {
+	// A URI's path must be absolute, or it reads as the authority.
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
 	// Writes take the lock up front, so a write never fails upgrading a read lock another writer holds.
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "_journal_mode=WAL&_txlock=immediate"}).String()
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err = db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("creating the search index at %s: %w", path, err)
 	}
@@ -133,18 +140,23 @@ func (f *FTS5) Search(ctx context.Context, q Query) (Results, error) {
 			return Results{}, fmt.Errorf("malformed search cursor %q", q.Cursor)
 		}
 	}
+	from, err := json.Marshal(append([]string{}, q.From...))
+	if err != nil {
+		return Results{}, err
+	}
 	rows, err := f.db.QueryContext(ctx, `
 		SELECT m.row_id, m.guid, m.chat_guid, m.sender, m.is_from_me, m.time, m.text,
 			snippet(messages_fts, 0, '', '', '…', 64)
 		FROM messages_fts JOIN messages m ON m.row_id = messages_fts.rowid
 		WHERE messages_fts MATCH @match
 			AND (@chat = '' OR m.chat_guid = @chat)
-			AND (@sender = '' OR m.sender = @sender)
+			AND (@from = '[]' OR m.sender IN (SELECT value FROM json_each(@from)))
+			AND (NOT @from_me OR m.is_from_me)
 			AND m.time >= @since AND m.time < @before
 			AND (m.time, m.row_id) < (@after_time, @after_row)
 		ORDER BY m.time DESC, m.row_id DESC
 		LIMIT @limit`,
-		sql.Named("match", match), sql.Named("chat", q.ChatGUID), sql.Named("sender", q.Sender),
+		sql.Named("match", match), sql.Named("chat", q.ChatGUID), sql.Named("from", string(from)), sql.Named("from_me", q.FromMe),
 		sql.Named("since", since), sql.Named("before", before),
 		sql.Named("after_time", afterTime), sql.Named("after_row", afterRow),
 		// One extra row tells whether another page follows.

@@ -9,10 +9,13 @@ import (
 	"path/filepath"
 
 	up "go.mau.fi/util/configupgrade"
+	"go.mau.fi/util/random"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 
+	"github.com/thurstonsand/imsgbus/internal/contacts"
 	"github.com/thurstonsand/imsgbus/internal/core"
+	"github.com/thurstonsand/imsgbus/internal/search"
 )
 
 //go:embed example-config.yaml
@@ -20,7 +23,12 @@ var exampleConfig string
 
 // Config is the bridge config's `network` section.
 type Config struct {
-	IMsgPath string `yaml:"imsg_path"`
+	IMsgPath    string `yaml:"imsg_path"`
+	SearchIndex string `yaml:"search_index"`
+	MCP         struct {
+		Listen string `yaml:"listen"`
+		Token  string `yaml:"token"`
+	} `yaml:"mcp"`
 }
 
 // UserLoginMetadata persists the login's cursor, so a restart replays what it missed.
@@ -42,21 +50,36 @@ var _ bridgev2.NetworkConnector = (*Connector)(nil)
 // events can load a login, whose client needs core, before Start runs.
 func (c *Connector) Init(bridge *bridgev2.Bridge) {
 	c.bridge = bridge
+	log := bridge.Log.With().Str("component", "core").Logger()
+	fail := func(err error, msg string) {
+		if err != nil {
+			bridge.Log.Fatal().Err(err).Msg(msg)
+		}
+	}
 	home, err := os.UserHomeDir()
-	if err != nil {
-		bridge.Log.Fatal().Err(err).Msg("No home directory to find chat.db in")
-	}
-	chatDB := filepath.Join(home, "Library", "Messages", "chat.db")
-	service, err := core.Start(bridge.Log.With().Str("component", "core").Logger(), c.Config.IMsgPath, chatDB)
-	if err != nil {
-		bridge.Log.Fatal().Err(err).Msg("Failed to start imsg rpc")
-	}
+	fail(err, "No home directory to find Messages and Contacts in")
+	ctx := log.WithContext(context.Background())
+	people, err := contacts.Open(ctx, filepath.Join(home, "Library", "Application Support", "AddressBook"))
+	fail(err, "Failed to read Contacts")
+	fail(people.Watch(ctx, log), "Failed to watch Contacts")
+	index, err := search.OpenFTS5(c.Config.SearchIndex)
+	fail(err, "Failed to open the search index")
+	service, err := core.Start(log, core.Options{
+		IMsgPath: c.Config.IMsgPath,
+		ChatDB:   filepath.Join(home, "Library", "Messages", "chat.db"),
+		Contacts: people,
+		Search:   index,
+	})
+	fail(err, "Failed to start imsg rpc")
 	c.core = service
 	go func() {
 		<-service.Exited()
 		bridge.Log.Fatal().Err(service.Err()).Msg("imsg rpc exited")
 	}()
 }
+
+// Core is the service the connector bridges, for other frontends to share.
+func (c *Connector) Core() *core.Service { return c.core }
 
 func (c *Connector) Start(context.Context) error { return nil }
 
@@ -84,6 +107,13 @@ func (c *Connector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 func (c *Connector) GetConfig() (string, any, up.Upgrader) {
 	return exampleConfig, &c.Config, up.SimpleUpgrader(func(helper up.Helper) {
 		helper.Copy(up.Str, "imsg_path")
+		helper.Copy(up.Str, "search_index")
+		helper.Copy(up.Str, "mcp", "listen")
+		if token, ok := helper.Get(up.Str, "mcp", "token"); !ok || token == "generate" {
+			helper.Set(up.Str, random.String(64), "mcp", "token")
+		} else {
+			helper.Copy(up.Str, "mcp", "token")
+		}
 	})
 }
 

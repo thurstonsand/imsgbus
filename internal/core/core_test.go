@@ -88,7 +88,7 @@ func fakeIMsg(scenario string) {
 func startFake(t *testing.T, scenario string) *core.Service {
 	t.Helper()
 	t.Setenv(fakeScenario, scenario)
-	service, err := core.Start(zerolog.Nop(), os.Args[0], "")
+	service, err := core.Start(zerolog.Nop(), core.Options{IMsgPath: os.Args[0]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestWatchDeliversBacklogInOrder(t *testing.T) {
 	defer cancel()
 
 	var rows []int64
-	err := service.Watch(ctx, 0, func(evt core.Event) {
+	err := service.Watch(ctx, 0, false, func(evt core.Event) {
 		msg, _ := evt.(core.Message)
 		rows = append(rows, msg.RowID)
 		if len(rows) == 300 {
@@ -124,7 +124,7 @@ func TestWatchEndsOnImsgError(t *testing.T) {
 	defer cancel()
 
 	var texts []string
-	err := service.Watch(ctx, 0, func(evt core.Event) {
+	err := service.Watch(ctx, 0, false, func(evt core.Event) {
 		msg, _ := evt.(core.Message)
 		texts = append(texts, msg.Text)
 	})
@@ -163,7 +163,7 @@ func TestWatchClassifiesTapbacksEditsAndUnsends(t *testing.T) {
 	defer cancel()
 
 	var got []string
-	_ = service.Watch(ctx, 0, func(evt core.Event) {
+	_ = service.Watch(ctx, 0, false, func(evt core.Event) {
 		switch evt := evt.(type) {
 		case core.Tapback:
 			got = append(got, fmt.Sprintf("tapback %s on %s removed=%v", evt.Emoji, evt.Target, evt.Removed))

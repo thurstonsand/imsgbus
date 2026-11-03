@@ -52,7 +52,7 @@ func (c *Client) Connect(ctx context.Context) {
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	go c.syncChats(ctx)
 	go c.keep(ctx, "message watch", func() error {
-		err := c.core.Watch(ctx, c.cursor.position(), c.handle)
+		err := c.core.Watch(ctx, c.cursor.position(), true, c.handle)
 		if _, ok := errors.AsType[*core.OverflowError](err); ok {
 			// The cursor is still before every row the watch didn't finish, so resume from it.
 			return nil

@@ -6,7 +6,7 @@ imsgbus drives Messages through [imsg](https://github.com/openclaw/imsg), so the
 
 ## Status
 
-Early. The Beeper bridge carries text in one-on-one chats both ways and turns Beeper read receipts into iMessage ones. The MCP server is not built yet.
+Early, and used by one person. The Beeper bridge carries messages, attachments, tapbacks, edits, unsends, read and delivery receipts and typing, in one-on-one and group chats. The MCP server reads, searches and sends by contact name.
 
 ## Install
 
@@ -24,6 +24,10 @@ imsgbus -c config.yaml
 ```
 
 Then send `login messages` to `@sh-imsgbusbot:beeper.local` in Beeper.
+
+## MCP
+
+The same process serves MCP over Streamable HTTP at `network.mcp.listen`. Clients send `Authorization: Bearer <network.mcp.token>`; the token is generated on first start. imsgbus needs Full Disk Access for chat.db and the AddressBook stores.
 
 ## License
 
