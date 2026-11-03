@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the tag, the versions and the changelog agree
+        run: scripts/check-changelog.sh "$GITHUB_REF_NAME"
+
+  ci:
+    name: CI
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  publish-release:
+    name: Publish binaries
+    needs: ci
+    # Builds with cgo for macOS, so it runs on one; see .goreleaser.yaml.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      HOMEBREW_TAP_PRIVATE_KEY: ${{ secrets.HOMEBREW_TAP_PRIVATE_KEY }}
+      MACOS_SIGN_P12: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+      MACOS_SIGN_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+      MACOS_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      MACOS_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up mise
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install: true
+          cache: false
+
+      - name: Validate release secrets
+        run: |
+          test -n "$HOMEBREW_TAP_PRIVATE_KEY"
+          test -n "$MACOS_SIGN_P12"
+          test -n "$MACOS_SIGN_PASSWORD"
+          test -n "$MACOS_NOTARY_KEY_ID"
+          test -n "$MACOS_NOTARY_ISSUER_ID"
+          test -n "$APPLE_NOTARY_KEY"
+
+      - name: Write notarization key
+        run: |
+          key_path="$RUNNER_TEMP/notary-key.p8"
+          printf '%s' "$APPLE_NOTARY_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "MACOS_NOTARY_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Prepare release notes
+        run: scripts/extract-release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish release
+        run: goreleaser release --clean --release-notes "$RUNNER_TEMP/release-notes.md"

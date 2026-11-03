@@ -1,0 +1,75 @@
+version: 2
+
+project_name: imsgbus
+
+builds:
+  - id: imsgbus
+    main: .
+    binary: imsgbus
+    # mautrix's bridge host stores its state through mattn/go-sqlite3, which needs cgo, so release
+    # builds run on a Mac and target only the Macs imsg runs on.
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    flags:
+      - -trimpath
+      - -tags=goolm
+    ldflags:
+      - -s -w -X main.Tag={{ .Tag }} -X main.Commit={{ .FullCommit }} -X main.BuildTime={{ .Date }}
+
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids:
+        - imsgbus
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY_PATH }}"
+        wait: true
+        timeout: 20m
+
+archives:
+  - id: imsgbus
+    ids:
+      - imsgbus
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  name_template: "{{ .Tag }}"
+
+homebrew_casks:
+  - name: imsgbus
+    ids:
+      - imsgbus
+    binaries:
+      - imsgbus
+    repository:
+      owner: thurstonsand
+      name: homebrew-tap
+      branch: main
+      git:
+        url: git@github.com:thurstonsand/homebrew-tap.git
+        private_key: '{{ if isEnvSet "HOMEBREW_TAP_PRIVATE_KEY" }}{{ .Env.HOMEBREW_TAP_PRIVATE_KEY }}{{ end }}'
+    homepage: https://github.com/thurstonsand/imsgbus
+    description: iMessage for Beeper and coding agents, served from a Mac
+    license: MIT
+    skip_upload: auto

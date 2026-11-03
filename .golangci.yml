@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - forcetypeassert
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - modernize
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - nolintlint
+    - perfsprint
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - wastedassign
+
+  settings:
+    govet:
+      enable:
+        - shadow
+
+  exclusions:
+    rules:
+      # The matrix frontend's exported methods implement bridgev2's interfaces, which document them.
+      - path: ^internal/matrix/
+        linters: [revive]
+        text: "exported method (Client|Connector)\\."
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

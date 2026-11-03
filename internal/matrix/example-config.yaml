@@ -1,0 +1,3 @@
+# The imsg executable whose `imsg rpc` child drives Messages. Run `imsg launch` once after every
+# Messages restart so its helper is injected.
+imsg_path: /usr/local/bin/imsg

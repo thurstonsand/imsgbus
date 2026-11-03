@@ -1,0 +1,12 @@
+# Binaries
+bin/
+dist/
+
+# OS
+.DS_Store
+
+# Amp
+.amp/portals/*
+
+# Local dev config, holds tokens
+.run/

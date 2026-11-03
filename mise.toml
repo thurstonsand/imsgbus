@@ -1,0 +1,126 @@
+min_version = "2026.7.4"
+
+[env]
+HK_MISE = "1"
+# mautrix's end-to-bridge encryption defaults to libolm through cgo; goolm is its pure-Go
+# replacement, so every build, test and lint compiles with it.
+GOFLAGS = "-tags=goolm"
+
+[hooks]
+enter = "mise bootstrap --yes --quiet"
+
+[tools]
+go = "1.27.3"
+golangci-lint = "2.15.0"
+goreleaser = "2.19.0"
+hk = "2.10.0"
+# hk's check and fix hooks run jactionlint, which runs shellcheck over every `run:` script. Renovate
+# does not know mise's `jactionlint` shorthand, so the backend is spelled out.
+"aqua:jdx/jactionlint" = "2.4.0"
+shellcheck = "0.11.0"
+node = "26"
+"npm:markdownlint-cli2" = "0.24.0"
+
+[tasks.bootstrap]
+description = "Install git hooks"
+run = "hk install --mise --quiet"
+sources = ["mise.toml", "hk.pkl"]
+outputs = { auto = true }
+quiet = true
+
+[tasks."lint:versions"]
+description = "Check the Go toolchain against go.mod's floor"
+run = '''
+status=0
+
+# go.mod states the oldest Go that can build imsgbus; mise.toml states the one that does.
+# They are allowed to differ, but the toolchain may never be older than the floor.
+go_mod_version="$(awk '/^go [0-9]/ {print $2; exit}' go.mod)"
+toolchain_version="$(awk '/^go = / {gsub(/"/, "", $3); print $3; exit}' mise.toml)"
+if [ -z "$toolchain_version" ]; then
+  echo "imsgbus: mise.toml declares no Go toolchain, so builds fall back to whatever is on PATH" >&2
+  status=1
+elif [ "$(printf '%s\n%s\n' "$go_mod_version" "$toolchain_version" | sort -V | head -1)" != "$go_mod_version" ]; then
+  echo "imsgbus: mise.toml builds with Go $toolchain_version, older than the $go_mod_version floor in go.mod" >&2
+  status=1
+fi
+
+exit "$status"
+'''
+
+[tasks."lint:changelog"]
+description = "Check CHANGELOG.md's headings and that its latest release is main.go's version"
+run = "scripts/check-changelog.sh"
+
+[tasks.build]
+description = "Build binary to bin/imsgbus"
+run = "go build -o bin/imsgbus ."
+
+[tasks.test]
+description = "Run unit tests"
+run = "go test -v ./..."
+
+[tasks.lint]
+description = "Run Go, Markdown, and workflow checks"
+depends = ["lint:*"]
+
+[tasks."lint:go"]
+description = "Lint Go sources and verify go.mod is tidy"
+run = ["go mod tidy -diff", "golangci-lint run ./..."]
+
+[tasks."lint:actions"]
+description = "Lint GitHub Actions workflows"
+run = "hk check --all --step jactionlint"
+
+# Renovate supports only Node 24 (its engines say ^24.11), while the repo develops on 26. Its tasks
+# run under MISE_ENV=renovate, whose mise.renovate.toml overlays Node 24 and adds Renovate, so mise
+# both installs and runs it on 24: re2, Renovate's native regex engine, is built for the Node that
+# installs it and refuses to load in another, leaving validation on JavaScript RegExp with only a
+# warning. `mise x` also puts that Node ahead of a Homebrew one already on PATH.
+[tasks."lint:renovate"]
+description = "Validate dependency update configuration"
+run = "MISE_ENV=renovate mise x -- renovate-config-validator"
+
+[tasks.renovate]
+description = "Run Renovate"
+run = "MISE_ENV=renovate mise x -- renovate"
+
+[tasks."lint:markdown"]
+description = "Lint Markdown"
+run = "markdownlint-cli2"
+
+# Deliberately outside the `lint:` group: `lint` expands `lint:*`, and the fixer rewrites files.
+[tasks.fix]
+description = "Auto-fix lint and formatting issues"
+run = [
+    "go mod tidy",
+    "golangci-lint run --fix ./...",
+    "hk fix --all --step jactionlint",
+    "markdownlint-cli2 --fix",
+]
+
+[tasks.imsgbus]
+description = "Run imsgbus with arguments: mise run imsgbus -- --version"
+run = "go run ."
+
+[tasks.release]
+description = "Release a reviewed [Unreleased] as X.Y.Z: commit, tag and push it"
+usage = 'arg "<version>" help="The version to release, as X.Y.Z"'
+run = 'scripts/release.sh "$usage_version"'
+
+[tasks.release-check]
+description = "Validate release configuration and artifacts"
+run = ["goreleaser check", "goreleaser release --snapshot --clean"]
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf bin/ dist/"
+
+[tasks.update-deps]
+description = "Upgrade Go modules and pinned tools, refreshing both lockfiles"
+run = [
+    "go get -u ./...",
+    "go mod tidy",
+    "mise upgrade --bump",
+    "mise lock",
+]
