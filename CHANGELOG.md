@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-03
+
 ### Added
 
 - A Beeper bridge for the Apple Account that Messages on the Mac is signed in to, for one-on-one and group chats:
