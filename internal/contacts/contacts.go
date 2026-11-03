@@ -204,7 +204,12 @@ func (c *Catalog) Watch(ctx context.Context, log zerolog.Logger, reloaded func()
 			select {
 			case <-ctx.Done():
 				return
-			case <-watcher.Events:
+			case event := <-watcher.Events:
+				// Reading a store changes the mode of its shared-memory file, so a reload would
+				// otherwise set off the next one; Contacts' own changes are writes.
+				if event.Op == fsnotify.Chmod {
+					continue
+				}
 				quiet.Reset(debounce)
 			case err := <-watcher.Errors:
 				log.Warn().Err(err).Msg("Watching contacts")

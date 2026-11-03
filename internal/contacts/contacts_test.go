@@ -269,4 +269,19 @@ func TestWatchReloadsOnChange(t *testing.T) {
 	if name, _ := catalog.Name("+15557654321"); name != "Theo Brandt" {
 		t.Fatalf("Name(added card's number) = %q after the reload; want Theo Brandt", name)
 	}
+	// SQLite changes the mode of a store's shared-memory file when it reads it, so a reload sees
+	// that; it must not set off the next reload.
+	var seq int
+	var schema, store string
+	if err := dbs[0].QueryRow("PRAGMA database_list").Scan(&seq, &schema, &store); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store+"-shm", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloaded:
+		t.Fatal("the catalog reloaded again with nothing changed")
+	case <-time.After(5 * time.Second):
+	}
 }

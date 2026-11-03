@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Contacts reloads only when Contacts changes, not every 2 seconds: reading the address book set off the next reload, and each reload reapplied Contacts to every person in Beeper.
+
 ## [0.1.0] - 2026-11-03
 
 ### Added
