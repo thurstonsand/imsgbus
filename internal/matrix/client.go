@@ -48,9 +48,6 @@ var (
 
 const watchRetryDelay = 5 * time.Second
 
-// recentChats is how far back a connect looks for chats to bring into Beeper.
-const recentChats = 30 * 24 * time.Hour
-
 func (c *Client) Connect(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	c.lock.Lock()
@@ -106,12 +103,12 @@ func (c *Client) keep(ctx context.Context, name string, run func() error) {
 	}
 }
 
-// syncChats brings recently active chats into Beeper and refreshes their info. Only a new portal
+// syncChats brings every chat with a message into Beeper and refreshes its info. Only a new portal
 // backfills: the message watch replays what existing ones missed.
 func (c *Client) syncChats(ctx context.Context) {
-	chats, err := c.core.RecentChats(ctx, time.Now().Add(-recentChats))
+	chats, err := c.core.RecentChats(ctx, time.Time{})
 	if err != nil {
-		zerolog.Ctx(ctx).Err(err).Msg("Failed to list recent chats")
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to list chats")
 		return
 	}
 	for _, chat := range chats {

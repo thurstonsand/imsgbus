@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Every chat with a message comes into Beeper on connect, with its full history, not only those active in the last 30 days.
+
 ## [0.2.1] - 2026-11-03
 
 ### Fixed
