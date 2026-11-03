@@ -16,7 +16,7 @@ builds:
       - arm64
     flags:
       - -trimpath
-      - -tags=goolm
+      - -tags=goolm,sqlite_fts5
     ldflags:
       - -s -w -X main.Tag={{ .Tag }} -X main.Commit={{ .FullCommit }} -X main.BuildTime={{ .Date }}
 

@@ -3,8 +3,9 @@ min_version = "2026.7.4"
 [env]
 HK_MISE = "1"
 # mautrix's end-to-bridge encryption defaults to libolm through cgo; goolm is its pure-Go
-# replacement, so every build, test and lint compiles with it.
-GOFLAGS = "-tags=goolm"
+# replacement, so every build, test and lint compiles with it. mattn/go-sqlite3 compiles FTS5, which
+# the search index needs, only under sqlite_fts5.
+GOFLAGS = "-tags=goolm,sqlite_fts5"
 
 [hooks]
 enter = "mise bootstrap --yes --quiet"

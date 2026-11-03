@@ -23,12 +23,14 @@ mise run release X.Y.Z  # Release [Unreleased] as X.Y.Z: commit, tag, push
 mise run clean          # Remove build artifacts
 ```
 
-`GOFLAGS=-tags=goolm` is set in `mise.toml`, so builds use mautrix's pure-Go olm instead of libolm. Builds need cgo for mattn/go-sqlite3, which mxmain imports, so CI and releases run on macOS.
+`GOFLAGS=-tags=goolm,sqlite_fts5` is set in `mise.toml`, so builds use mautrix's pure-Go olm instead of libolm and compile SQLite's FTS5 for the search index. Builds need cgo for mattn/go-sqlite3, which mxmain imports, so CI and releases run on macOS.
 
 ## Layout
 
 - `main.go`: the mxmain host process.
 - `internal/imsg`: the JSON-RPC client for one `imsg rpc` child, and typed wrappers for the methods imsgbus calls.
+- `internal/contacts`: the contacts catalog, read from the AddressBook stores: names for handles, and handles for names.
+- `internal/search`: the pluggable search `Backend` and its FTS5 implementation.
 - `internal/core`: frontend-neutral service over imsg.
 - `internal/matrix`: the bridgev2 network connector.
 
