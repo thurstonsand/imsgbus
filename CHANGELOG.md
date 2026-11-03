@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-03
+
 ### Added
 
 - Deleting a chat syncs both ways. A chat deleted in iMessage leaves Beeper, including one deleted while imsgbus was down, and comes back when it is recovered from Recently Deleted or gets a new message; a delete on another device arrives once the Mac syncs Messages in iCloud. Deleting a chat in Beeper erases it from Messages on the Mac, without Recently Deleted, and leaves it on your other devices.
