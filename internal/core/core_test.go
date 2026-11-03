@@ -63,6 +63,16 @@ func fakeIMsg(scenario string) {
 				for row := 1; row <= 300; row++ {
 					write(message(row))
 				}
+			case "mutations":
+				for _, m := range []string{
+					`{"id":5,"guid":"t5","chat_guid":"c","sender":"+15550000000","is_reaction":true,"reaction_type":"laugh","is_reaction_add":true,"reacted_to_guid":"g1"}`,
+					`{"id":6,"guid":"t6","chat_guid":"c","sender":"+15550000000","is_reaction":true,"reaction_type":"custom","reaction_emoji":"🦀","is_reaction_add":false,"reacted_to_guid":"g1"}`,
+					`{"id":1,"guid":"g1","chat_guid":"c","type":"edited","text":"fixed"}`,
+					`{"id":2,"guid":"g2","chat_guid":"c","type":"edited","text":""}`,
+					`{"id":3,"guid":"g3","chat_guid":"c","type":"unsent"}`,
+				} {
+					write(`{"jsonrpc":"2.0","method":"message","params":{"subscription":7,"message":` + m + `}}`)
+				}
 			case "error":
 				// Row 1 has an attachment before its text.
 				write(strings.Replace(message(1), `"text":"m1"`, `"text":"\ufffcm1"`, 1))
@@ -78,7 +88,7 @@ func fakeIMsg(scenario string) {
 func startFake(t *testing.T, scenario string) *core.Service {
 	t.Helper()
 	t.Setenv(fakeScenario, scenario)
-	service, err := core.Start(zerolog.Nop(), os.Args[0])
+	service, err := core.Start(zerolog.Nop(), os.Args[0], "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +101,9 @@ func TestWatchDeliversBacklogInOrder(t *testing.T) {
 	defer cancel()
 
 	var rows []int64
-	err := service.Watch(ctx, 0, func(m core.Message) {
-		rows = append(rows, m.RowID)
+	err := service.Watch(ctx, 0, func(evt core.Event) {
+		msg, _ := evt.(core.Message)
+		rows = append(rows, msg.RowID)
 		if len(rows) == 300 {
 			cancel()
 		}
@@ -113,7 +124,10 @@ func TestWatchEndsOnImsgError(t *testing.T) {
 	defer cancel()
 
 	var texts []string
-	err := service.Watch(ctx, 0, func(m core.Message) { texts = append(texts, m.Text) })
+	err := service.Watch(ctx, 0, func(evt core.Event) {
+		msg, _ := evt.(core.Message)
+		texts = append(texts, msg.Text)
+	})
 	if err == nil || !strings.Contains(err.Error(), "database is locked") {
 		t.Fatalf("Watch returned %v, want imsg's error", err)
 	}
@@ -140,5 +154,38 @@ func TestMarkReadThroughNeedsEveryInboundMessageSeen(t *testing.T) {
 		if marked != tc.want {
 			t.Errorf("read through %s: marked %v, want %v", tc.seen, marked, tc.want)
 		}
+	}
+}
+
+func TestWatchClassifiesTapbacksEditsAndUnsends(t *testing.T) {
+	service := startFake(t, "mutations")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	var got []string
+	_ = service.Watch(ctx, 0, func(evt core.Event) {
+		switch evt := evt.(type) {
+		case core.Tapback:
+			got = append(got, fmt.Sprintf("tapback %s on %s removed=%v", evt.Emoji, evt.Target, evt.Removed))
+		case core.Edit:
+			got = append(got, fmt.Sprintf("edit %s to %q", evt.GUID, evt.Text))
+		case core.Unsend:
+			got = append(got, "unsend "+evt.GUID)
+		default:
+			got = append(got, fmt.Sprintf("%T", evt))
+		}
+		if len(got) == 5 {
+			cancel()
+		}
+	})
+	want := []string{
+		"tapback 😂 on g1 removed=false",
+		"tapback 🦀 on g1 removed=true",
+		`edit g1 to "fixed"`,
+		"unsend g2",
+		"unsend g3",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

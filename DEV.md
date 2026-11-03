@@ -29,10 +29,11 @@ mise run clean          # Remove build artifacts
 
 - `main.go`: the mxmain host process.
 - `internal/imsg`: the JSON-RPC client for one `imsg rpc` child, and typed wrappers for the methods imsgbus calls.
+- `internal/chatdb`: a read-only watch of Messages' chat.db for deliveries and reads, which imsg doesn't report.
 - `internal/contacts`: the contacts catalog, read from the AddressBook stores: names for handles, and handles for names.
 - `internal/search`: the pluggable search `Backend` and its FTS5 implementation.
 - `internal/core`: frontend-neutral service over imsg.
-- `internal/matrix`: the bridgev2 network connector.
+- `internal/matrix`: the bridgev2 network connector: `client.go` connects and watches, `convert.go` turns iMessages into Matrix events, `handlematrix.go` the reverse, and `backfill.go` pages through history.
 
 ## Code style
 

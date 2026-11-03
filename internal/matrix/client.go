@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/jsontime"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -31,9 +32,17 @@ type Client struct {
 var (
 	_ bridgev2.NetworkAPI                    = (*Client)(nil)
 	_ bridgev2.ReadReceiptHandlingNetworkAPI = (*Client)(nil)
+	_ bridgev2.TypingHandlingNetworkAPI      = (*Client)(nil)
+	_ bridgev2.ReactionHandlingNetworkAPI    = (*Client)(nil)
+	_ bridgev2.EditHandlingNetworkAPI        = (*Client)(nil)
+	_ bridgev2.RedactionHandlingNetworkAPI   = (*Client)(nil)
+	_ bridgev2.BackfillingNetworkAPI         = (*Client)(nil)
 )
 
 const watchRetryDelay = 5 * time.Second
+
+// recentChats is how far back a connect looks for chats to bring into Beeper.
+const recentChats = 30 * 24 * time.Hour
 
 func (c *Client) Connect(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -41,7 +50,21 @@ func (c *Client) Connect(ctx context.Context) {
 	c.cancel = cancel
 	c.lock.Unlock()
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-	go c.watch(ctx)
+	go c.syncChats(ctx)
+	go c.keep(ctx, "message watch", func() error {
+		err := c.core.Watch(ctx, c.cursor.position(), c.handle)
+		if _, ok := errors.AsType[*core.OverflowError](err); ok {
+			// The cursor is still before every row the watch didn't finish, so resume from it.
+			return nil
+		}
+		return err
+	})
+	go c.keep(ctx, "receipt watch", func() error {
+		return c.core.WatchReceipts(ctx, func(r core.Receipt) { c.handleReceipt(ctx, r) })
+	})
+	go c.keep(ctx, "typing watch", func() error {
+		return c.core.WatchTyping(ctx, func(t core.Typing) { c.handleTyping(t) })
+	})
 }
 
 func (c *Client) Disconnect() {
@@ -52,15 +75,16 @@ func (c *Client) Disconnect() {
 	}
 }
 
-func (c *Client) watch(ctx context.Context) {
-	log := zerolog.Ctx(ctx)
+// keep runs a watch until ctx ends, restarting it when it ends early.
+func (c *Client) keep(ctx context.Context, name string, run func() error) {
+	log := zerolog.Ctx(ctx).With().Str("watch", name).Logger()
 	for {
-		err := c.core.Watch(ctx, c.cursor.position(), func(msg core.Message) { c.handle(ctx, msg) })
+		err := run()
 		if ctx.Err() != nil {
 			return
 		}
-		if overflow, ok := errors.AsType[*core.OverflowError](err); ok {
-			log.Warn().Int64("resume_after", overflow.ResumeAfter).Msg("Watch fell behind; resuming")
+		if err == nil {
+			log.Warn().Msg("Watch fell behind; resuming")
 			continue
 		}
 		log.Err(err).Msg("Watch ended; retrying")
@@ -72,57 +96,159 @@ func (c *Client) watch(ctx context.Context) {
 	}
 }
 
-func (c *Client) handle(ctx context.Context, msg core.Message) {
-	if msg.IsGroup {
-		c.cursor.finish(ctx, msg.RowID)
+// syncChats brings recently active chats into Beeper and refreshes their info. Only a new portal
+// backfills: the message watch replays what existing ones missed.
+func (c *Client) syncChats(ctx context.Context) {
+	chats, err := c.core.RecentChats(ctx, time.Now().Add(-recentChats))
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to list recent chats")
 		return
 	}
-	content := &event.MessageEventContent{MsgType: event.MsgText, Body: msg.Text}
-	if msg.Text == "" {
-		// A row without text, such as an attachment, still lands in the portal: a read receipt
-		// on what Beeper shows as newest must not mark an unseen newer row read.
-		content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Unsupported message; open it on an Apple device"}
+	for _, chat := range chats {
+		c.login.QueueRemoteEvent(&simplevent.ChatResync{
+			Type:            bridgev2.RemoteEventChatResync,
+			PortalKey:       c.portalKey(chat.GUID),
+			CreatePortal:    true,
+			GetChatInfoFunc: c.GetChatInfo,
+			LatestMessageTS: chat.LastMessage,
+			CheckNeedsBackfillFunc: func(_ context.Context, latest *database.Message) (bool, error) {
+				return latest == nil, nil
+			},
+		})
 	}
-	c.cursor.start(msg.RowID)
-	c.login.QueueRemoteEvent(&simplevent.PreConvertedMessage{
-		Type:         bridgev2.RemoteEventMessage,
-		PortalKey:    c.portalKey(msg.ChatGUID),
-		CreatePortal: true,
-		Sender:       c.sender(msg),
-		Timestamp:    msg.Time,
-		StreamOrder:  msg.RowID,
-		PostHandleFunc: func(ctx context.Context, _ *bridgev2.Portal) {
-			c.cursor.finish(ctx, msg.RowID)
-		},
-		ID:            networkid.MessageID(msg.GUID),
-		TransactionID: networkid.TransactionID(msg.GUID),
-		Data: &bridgev2.ConvertedMessage{
-			ReplyTo: replyTo(msg.ReplyTo),
-			Parts:   []*bridgev2.ConvertedMessagePart{{Type: event.EventMessage, Content: content}},
-		},
+}
+
+func (c *Client) handle(evt core.Event) {
+	switch evt := evt.(type) {
+	case core.Message:
+		c.cursor.start(evt.RowID)
+		c.login.QueueRemoteEvent(&simplevent.Message[core.Message]{
+			Type:         bridgev2.RemoteEventMessage,
+			PortalKey:    c.portalKey(evt.ChatGUID),
+			CreatePortal: true,
+			Sender:       c.sender(evt.IsFromMe, evt.Sender),
+			Timestamp:    evt.Time,
+			StreamOrder:  evt.RowID,
+			PostHandleFunc: func(ctx context.Context, _ *bridgev2.Portal) {
+				c.cursor.finish(ctx, evt.RowID)
+			},
+			ID:                 networkid.MessageID(evt.GUID),
+			TransactionID:      networkid.TransactionID(evt.GUID),
+			Data:               evt,
+			ConvertMessageFunc: convertMessage,
+		})
+	case core.Tapback:
+		c.cursor.start(evt.RowID)
+		evtType := bridgev2.RemoteEventReaction
+		if evt.Removed {
+			evtType = bridgev2.RemoteEventReactionRemove
+		}
+		c.login.QueueRemoteEvent(&simplevent.Reaction{
+			Type:      evtType,
+			PortalKey: c.portalKey(evt.ChatGUID),
+			Sender:    c.sender(evt.IsFromMe, evt.Sender),
+			Timestamp: evt.Time,
+			PostHandleFunc: func(ctx context.Context, _ *bridgev2.Portal) {
+				c.cursor.finish(ctx, evt.RowID)
+			},
+			TargetMessage: networkid.MessageID(evt.Target),
+			Emoji:         evt.Emoji,
+		})
+	case core.Edit:
+		c.login.QueueRemoteEvent(&simplevent.Message[core.Edit]{
+			Type:            bridgev2.RemoteEventEdit,
+			PortalKey:       c.portalKey(evt.ChatGUID),
+			Sender:          c.sender(evt.IsFromMe, evt.Sender),
+			Timestamp:       evt.Time,
+			TargetMessage:   networkid.MessageID(evt.GUID),
+			Data:            evt,
+			ConvertEditFunc: convertEdit,
+		})
+	case core.Unsend:
+		c.login.QueueRemoteEvent(&simplevent.MessageRemove{
+			Type:          bridgev2.RemoteEventMessageRemove,
+			PortalKey:     c.portalKey(evt.ChatGUID),
+			Sender:        c.sender(evt.IsFromMe, evt.Sender),
+			Timestamp:     evt.Time,
+			TargetMessage: networkid.MessageID(evt.GUID),
+		})
+	case core.ChatChange:
+		c.login.QueueRemoteEvent(&simplevent.ChatResync{
+			Type:      bridgev2.RemoteEventChatResync,
+			PortalKey: c.portalKey(evt.Chat.GUID),
+			ChatInfo:  c.chatInfo(evt.Chat),
+		})
+	}
+}
+
+func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
+	sender := c.self()
+	if r.IsFromMe {
+		other, ok := otherHandle(r.ChatGUID)
+		if !ok {
+			// Groups report delivery and reads for no one in particular.
+			return
+		}
+		sender = bridgev2.EventSender{Sender: networkid.UserID(other)}
+	}
+	evtType := bridgev2.RemoteEventReadReceipt
+	if r.Kind == core.Delivered {
+		evtType = bridgev2.RemoteEventDeliveryReceipt
+	}
+	zerolog.Ctx(ctx).Debug().Str("guid", r.GUID).Stringer("type", evtType).Bool("from_me", r.IsFromMe).Msg("Bridging receipt")
+	c.login.QueueRemoteEvent(&simplevent.Receipt{
+		Type:                evtType,
+		PortalKey:           c.portalKey(r.ChatGUID),
+		Sender:              sender,
+		Timestamp:           r.Time,
+		LastTarget:          networkid.MessageID(r.GUID),
+		Targets:             []networkid.MessageID{networkid.MessageID(r.GUID)},
+		ReadUpTo:            r.Time,
+		ReadUpToStreamOrder: r.RowID,
 	})
+}
+
+// typingTimeout is how long Beeper shows someone typing without hearing they stopped.
+const typingTimeout = 60 * time.Second
+
+func (c *Client) handleTyping(t core.Typing) {
+	other, ok := otherHandle(t.ChatGUID)
+	if !ok {
+		return
+	}
+	timeout := time.Duration(0)
+	if t.IsTyping {
+		timeout = typingTimeout
+	}
+	c.login.QueueRemoteEvent(&simplevent.Typing{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventTyping,
+			PortalKey: c.portalKey(t.ChatGUID),
+			Sender:    bridgev2.EventSender{Sender: networkid.UserID(other)},
+		},
+		Timeout: timeout,
+	})
+}
+
+// otherHandle is the other side of a one-on-one chat, from its GUID ("any;-;+15551234567").
+func otherHandle(chatGUID string) (string, bool) {
+	_, after, ok := strings.Cut(chatGUID, ";-;")
+	return after, ok
 }
 
 func (c *Client) portalKey(chatGUID string) networkid.PortalKey {
 	return networkid.PortalKey{ID: networkid.PortalID(chatGUID), Receiver: c.login.ID}
 }
 
-func (c *Client) sender(msg core.Message) bridgev2.EventSender {
-	if msg.IsFromMe {
+func (c *Client) sender(isFromMe bool, handle string) bridgev2.EventSender {
+	if isFromMe {
 		return c.self()
 	}
-	return bridgev2.EventSender{Sender: networkid.UserID(msg.Sender)}
+	return bridgev2.EventSender{Sender: networkid.UserID(handle)}
 }
 
 func (c *Client) self() bridgev2.EventSender {
 	return bridgev2.EventSender{IsFromMe: true, SenderLogin: c.login.ID, Sender: networkid.UserID(c.login.RemoteName)}
-}
-
-func replyTo(guid string) *networkid.MessageOptionalPartID {
-	if guid == "" {
-		return nil
-	}
-	return &networkid.MessageOptionalPartID{MessageID: networkid.MessageID(guid)}
 }
 
 func (c *Client) IsLoggedIn() bool { return true }
@@ -138,6 +264,10 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	if err != nil {
 		return nil, err
 	}
+	return c.chatInfo(chat), nil
+}
+
+func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
 	members := &bridgev2.ChatMemberList{
 		IsFull:    true,
 		MemberMap: bridgev2.ChatMemberMap{},
@@ -146,7 +276,7 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	for _, handle := range chat.Participants {
 		members.MemberMap.Set(bridgev2.ChatMember{Sender: networkid.UserID(handle)})
 	}
-	info := &bridgev2.ChatInfo{Members: members}
+	info := &bridgev2.ChatInfo{Members: members, CanBackfill: true}
 	if chat.IsGroup {
 		info.Type = new(database.RoomTypeDefault)
 		if chat.Name != "" {
@@ -158,7 +288,7 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 			members.OtherUserID = networkid.UserID(chat.Participants[0])
 		}
 	}
-	return info, nil
+	return info
 }
 
 func (c *Client) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
@@ -171,46 +301,35 @@ func (c *Client) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev
 	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{identifier}}, nil
 }
 
+// Apple lets a sender edit a message for 15 minutes and unsend it for 2.
+var (
+	editWindow   = 15 * time.Minute
+	unsendWindow = 2 * time.Minute
+)
+
 func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
+	file := &event.FileFeatures{
+		MimeTypes: map[string]event.CapabilitySupportLevel{"*/*": event.CapLevelFullySupported},
+		MaxSize:   100 << 20,
+		Caption:   event.CapLevelPartialSupport,
+	}
 	return &event.RoomFeatures{
-		ID:           "house.thurstons.imsgbus.capabilities.v1",
-		Reply:        event.CapLevelFullySupported,
-		ReadReceipts: true,
-	}
-}
-
-func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	if msg.Content.MsgType != event.MsgText {
-		return nil, bridgev2.ErrUnsupportedMessageType
-	}
-	var replyGUID string
-	if msg.ReplyTo != nil {
-		replyGUID = string(msg.ReplyTo.ID)
-	}
-	guid := core.NewMessageGUID()
-	txn := networkid.TransactionID(guid)
-	// The watch can deliver this message's echo before SendText returns.
-	msg.AddPendingToIgnore(txn)
-	if err := c.core.SendText(ctx, string(msg.Portal.ID), guid, msg.Content.Body, replyGUID); err != nil {
-		return nil, err
-	}
-	return &bridgev2.MatrixMessageResponse{
-		DB: &database.Message{
-			ID:        networkid.MessageID(guid),
-			SenderID:  networkid.UserID(c.login.RemoteName),
-			Timestamp: time.Now(),
+		ID: "house.thurstons.imsgbus.capabilities.v3",
+		File: event.FileFeatureMap{
+			event.MsgImage:    file,
+			event.MsgVideo:    file,
+			event.MsgAudio:    file,
+			event.MsgFile:     file,
+			event.CapMsgVoice: file,
 		},
-		RemovePending: txn,
-	}, nil
-}
-
-// HandleMatrixReadReceipt marks the chat read once the receipt covers every message from the
-// other side; see core.MarkReadThrough.
-func (c *Client) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.MatrixReadReceipt) error {
-	if receipt.ExactMessage == nil {
-		return nil
+		Reply:               event.CapLevelFullySupported,
+		Edit:                event.CapLevelFullySupported,
+		EditMaxAge:          new(jsontime.S(editWindow)),
+		Delete:              event.CapLevelFullySupported,
+		DeleteMaxAge:        new(jsontime.S(unsendWindow)),
+		Reaction:            event.CapLevelFullySupported,
+		ReactionCount:       1,
+		ReadReceipts:        true,
+		TypingNotifications: true,
 	}
-	marked, err := c.core.MarkReadThrough(ctx, string(receipt.Portal.ID), string(receipt.ExactMessage.ID))
-	zerolog.Ctx(ctx).Debug().Bool("marked_read", marked).Msg("Handled read receipt")
-	return err
 }

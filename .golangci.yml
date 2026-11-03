@@ -35,6 +35,8 @@ linters:
     - wastedassign
 
   settings:
+    exhaustive:
+      default-signifies-exhaustive: true
     govet:
       enable:
         - shadow

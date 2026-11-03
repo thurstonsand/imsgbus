@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -14,29 +15,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/thurstonsand/imsgbus/internal/chatdb"
 	"github.com/thurstonsand/imsgbus/internal/imsg"
 )
 
-// Message is one new message in any chat, from any of the account's devices.
-type Message struct {
-	// RowID orders messages within this Mac's database; watches resume after it.
-	RowID    int64
-	GUID     string
-	ChatGUID string
-	IsGroup  bool
-	Sender   string
-	IsFromMe bool
-	Text     string
-	Time     time.Time
-	ReplyTo  string
-}
-
-// Chat is one conversation.
+// Chat is one conversation. Participants excludes this account.
 type Chat struct {
 	GUID         string
 	Name         string
 	IsGroup      bool
 	Participants []string
+	LastMessage  time.Time
+}
+
+func toChat(c imsg.Chat) Chat {
+	name := c.DisplayName
+	if name == "" && c.Name != c.Identifier {
+		// chats.get has no display_name, and both name an unnamed chat by its identifier.
+		name = c.Name
+	}
+	return Chat{GUID: c.GUID, Name: name, IsGroup: c.IsGroup, Participants: c.Participants, LastMessage: c.LastMessage}
 }
 
 // Account is the Apple Account Messages is signed in to.
@@ -49,6 +47,7 @@ type Account struct {
 type Service struct {
 	log    zerolog.Logger
 	client *imsg.Client
+	chatDB string
 
 	lock  sync.Mutex
 	chats map[string]Chat
@@ -74,9 +73,10 @@ type queue struct {
 func newQueue() *queue { return &queue{wake: make(chan struct{}, 1)} }
 
 // Start spawns imsg.
-func Start(log zerolog.Logger, imsgPath string) (*Service, error) {
+func Start(log zerolog.Logger, imsgPath, chatDB string) (*Service, error) {
 	s := &Service{
 		log:     log,
+		chatDB:  chatDB,
 		chats:   make(map[string]Chat),
 		chatIDs: make(map[string]int64),
 		names:   make(map[string]string),
@@ -117,13 +117,30 @@ func (e *OverflowError) Error() string {
 	return fmt.Sprintf("watch fell behind; resume after row %d", e.ResumeAfter)
 }
 
-// Watch calls handle for every new message after sinceRowID, or from now when it is 0, until ctx
-// ends, imsg dies, or the watch overflows or fails.
-func (s *Service) Watch(ctx context.Context, sinceRowID int64, handle func(Message)) error {
+// Watch calls handle for every new message or tapback after sinceRowID, or from now when it is 0,
+// and every edit and unsend from now, until ctx ends, imsg dies, or the watch overflows or fails.
+// Edits and unsends made while nothing watched are lost.
+func (s *Service) Watch(ctx context.Context, sinceRowID int64, handle func(Event)) error {
 	id, err := s.client.WatchSubscribe(ctx, sinceRowID)
 	if err != nil {
 		return err
 	}
+	return s.pump(ctx, id, func(n notification) error {
+		var m imsg.MessageNotification
+		if err := json.Unmarshal(n.params, &m); err != nil {
+			return fmt.Errorf("decode watch message: %w", err)
+		}
+		if change, changed := s.remember(m.Message); changed {
+			handle(change)
+		}
+		handle(toEvent(m.Message))
+		return nil
+	})
+}
+
+// pump passes subscription id's notifications to deliver, in order, until ctx ends, imsg dies, or
+// a terminal notification ends the subscription.
+func (s *Service) pump(ctx context.Context, id int64, deliver func(notification) error) error {
 	s.lock.Lock()
 	q, ok := s.queues[id]
 	if !ok {
@@ -136,7 +153,7 @@ func (s *Service) Watch(ctx context.Context, sinceRowID int64, handle func(Messa
 		delete(s.queues, id)
 		s.lock.Unlock()
 		if err := s.client.WatchUnsubscribe(context.WithoutCancel(ctx), id); err != nil {
-			s.log.Warn().Err(err).Int64("subscription", id).Msg("Failed to unsubscribe watch")
+			s.log.Warn().Err(err).Int64("subscription", id).Msg("Failed to unsubscribe")
 		}
 	}()
 
@@ -153,14 +170,18 @@ func (s *Service) Watch(ctx context.Context, sinceRowID int64, handle func(Messa
 		q.items = nil
 		s.lock.Unlock()
 		for _, n := range items {
-			if err := s.deliver(n, handle); err != nil {
+			if err := terminal(n); err != nil {
+				return err
+			}
+			if err := deliver(n); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (s *Service) deliver(n notification, handle func(Message)) error {
+// terminal is the error a subscription-ending notification carries, or nil for any other.
+func terminal(n notification) error {
 	switch n.method {
 	case imsg.NotifyOverflow:
 		var o imsg.OverflowNotification
@@ -168,23 +189,90 @@ func (s *Service) deliver(n notification, handle func(Message)) error {
 			return fmt.Errorf("decode watch overflow: %w", err)
 		}
 		return &OverflowError{ResumeAfter: o.ResumeAfterRowID}
-	case imsg.NotifyError:
+	case imsg.NotifyError, imsg.NotifyBridgeError:
 		var e imsg.ErrorNotification
 		if err := json.Unmarshal(n.params, &e); err != nil {
-			return fmt.Errorf("decode watch error: %w", err)
+			return fmt.Errorf("decode %s: %w", n.method, err)
 		}
-		return fmt.Errorf("imsg ended the watch: %s", e.Error.Message)
+		return fmt.Errorf("imsg ended subscription with %s: %s", n.method, e.Error.Message)
+	case imsg.NotifyBridgeOverflow:
+		return errors.New("imsg bridge events fell behind")
 	}
-	var m imsg.MessageNotification
-	if err := json.Unmarshal(n.params, &m); err != nil {
-		return fmt.Errorf("decode watch message: %w", err)
-	}
-	if m.Message.Type != "" {
-		s.log.Debug().Str("type", m.Message.Type).Str("guid", m.Message.GUID).Msg("Ignoring message mutation")
-		return nil
-	}
-	handle(s.remember(m.Message))
 	return nil
+}
+
+// Typing is someone else starting or stopping typing in a one-on-one chat.
+type Typing struct {
+	ChatGUID string
+	IsTyping bool
+}
+
+// WatchTyping calls handle whenever the other side of a one-on-one chat starts or stops typing.
+func (s *Service) WatchTyping(ctx context.Context, handle func(Typing)) error {
+	id, err := s.client.BridgeEventsSubscribe(ctx)
+	if err != nil {
+		return err
+	}
+	return s.pump(ctx, id, func(n notification) error {
+		var e imsg.BridgeEventNotification
+		if err := json.Unmarshal(n.params, &e); err != nil {
+			return fmt.Errorf("decode bridge event: %w", err)
+		}
+		typing := e.Event.Event == "started-typing"
+		if !typing && e.Event.Event != "stopped-typing" {
+			return nil
+		}
+		// Bridge events name the chat by service ("iMessage;-;+1555…") where chat.db's GUID may
+		// say "any;-;+1555…"; the rest identifies it.
+		_, rest, _ := strings.Cut(e.Event.Data.ChatGUID, ";")
+		s.lock.Lock()
+		var guid string
+		for g := range s.chatIDs {
+			if _, r, _ := strings.Cut(g, ";"); r == rest {
+				guid = g
+			}
+		}
+		s.lock.Unlock()
+		if guid == "" || !strings.HasPrefix(rest, "-;") {
+			s.log.Debug().Str("chat_guid", e.Event.Data.ChatGUID).Msg("Ignoring typing in a group or unseen chat")
+			return nil
+		}
+		handle(Typing{ChatGUID: guid, IsTyping: typing})
+		return nil
+	})
+}
+
+// SetTyping shows or clears the typing indicator in a chat.
+func (s *Service) SetTyping(ctx context.Context, chatGUID string, typing bool) error {
+	return s.client.Typing(ctx, chatGUID, typing)
+}
+
+// ReceiptKind is what a receipt says happened to a message.
+type ReceiptKind = chatdb.Kind
+
+// Receipt kinds.
+const (
+	Delivered = chatdb.Delivered
+	Read      = chatdb.Read
+)
+
+// Receipt is a message's delivery or read: of your message by its recipient, or of an incoming
+// message by you on any device.
+type Receipt struct {
+	Kind     ReceiptKind
+	RowID    int64
+	GUID     string
+	ChatGUID string
+	// IsFromMe is whose message it is: true for yours, read or delivered by the other side.
+	IsFromMe bool
+	Time     time.Time
+}
+
+// WatchReceipts calls handle for every delivery and read of a recent message until ctx ends.
+func (s *Service) WatchReceipts(ctx context.Context, handle func(Receipt)) error {
+	return chatdb.Watch(ctx, s.chatDB, func(c chatdb.Change) {
+		handle(Receipt{Kind: c.Kind, RowID: c.RowID, GUID: c.GUID, ChatGUID: c.ChatGUID, IsFromMe: c.IsFromMe, Time: c.Time})
+	})
 }
 
 // NewMessageGUID returns a GUID for SendText, for callers that must know it before sending.
@@ -195,32 +283,122 @@ func (s *Service) SendText(ctx context.Context, chatGUID, guid, text, replyTo st
 	return s.client.SendTracked(ctx, chatGUID, guid, text, replyTo)
 }
 
-// Chat looks up a chat by GUID among the most recently active.
+// Chat looks up a chat by GUID.
 func (s *Service) Chat(ctx context.Context, guid string) (Chat, error) {
 	s.lock.Lock()
 	chat, ok := s.chats[guid]
+	id, known := s.chatIDs[guid]
 	s.lock.Unlock()
 	if ok {
 		return chat, nil
 	}
-	chats, err := s.client.ChatsList(ctx, 500)
+	if !known {
+		if err := s.refreshChats(ctx); err != nil {
+			return Chat{}, err
+		}
+		s.lock.Lock()
+		id, known = s.chatIDs[guid]
+		s.lock.Unlock()
+		if !known {
+			return Chat{}, fmt.Errorf("no chat %s", guid)
+		}
+	}
+	c, err := s.client.ChatsGet(ctx, id)
 	if err != nil {
 		return Chat{}, err
+	}
+	chat = toChat(c)
+	s.lock.Lock()
+	s.chats[guid] = chat
+	s.lock.Unlock()
+	return chat, nil
+}
+
+// allChats is more than this account will have, so chats.list returns every chat.
+const allChats = 100000
+
+// RecentChats returns the chats with a message since the given time, newest first.
+func (s *Service) RecentChats(ctx context.Context, since time.Time) ([]Chat, error) {
+	chats, err := s.client.ChatsList(ctx, allChats)
+	if err != nil {
+		return nil, err
+	}
+	var recent []Chat
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	for _, c := range chats {
+		s.learn(c)
+		if c.LastMessage.After(since) {
+			recent = append(recent, toChat(c))
+		}
+	}
+	return recent, nil
+}
+
+func (s *Service) refreshChats(ctx context.Context) error {
+	chats, err := s.client.ChatsList(ctx, allChats)
+	if err != nil {
+		return err
 	}
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	for _, c := range chats {
-		s.chats[c.GUID] = Chat{GUID: c.GUID, Name: c.DisplayName, IsGroup: c.IsGroup, Participants: c.Participants}
-		s.chatIDs[c.GUID] = c.ID
-		if !c.IsGroup && c.ContactName != "" && len(c.Participants) == 1 {
-			s.names[c.Participants[0]] = c.ContactName
-		}
+		s.learn(c)
 	}
-	chat, ok = s.chats[guid]
-	if !ok {
-		return Chat{}, fmt.Errorf("chat %s is not among the %d most recent", guid, len(chats))
+	return nil
+}
+
+// learn records what chats.list says about a chat; the caller holds s.lock.
+func (s *Service) learn(c imsg.Chat) {
+	s.chatIDs[c.GUID] = c.ID
+	if !c.IsGroup && c.ContactName != "" && len(c.Participants) == 1 {
+		s.names[c.Participants[0]] = c.ContactName
 	}
-	return chat, nil
+}
+
+// History returns up to limit of a chat's messages older than before, or newer than after,
+// oldest first. Tapbacks are left out.
+func (s *Service) History(ctx context.Context, chatGUID string, after, before time.Time, limit int) ([]Message, error) {
+	if _, err := s.Chat(ctx, chatGUID); err != nil {
+		return nil, err
+	}
+	s.lock.Lock()
+	chatID := s.chatIDs[chatGUID]
+	s.lock.Unlock()
+	if !after.IsZero() {
+		// imsg's start bound is inclusive.
+		after = after.Add(time.Nanosecond)
+	}
+	found, err := s.client.History(ctx, chatID, limit, after, before, true)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, 0, len(found))
+	for _, f := range slices.Backward(found) {
+		messages = append(messages, toMessage(f))
+	}
+	return messages, nil
+}
+
+// SendFile sends a file to a chat, as a voice message when audio is set, and returns the new
+// message's GUID.
+func (s *Service) SendFile(ctx context.Context, chatGUID, path, replyTo string, audio bool) (string, error) {
+	return s.client.SendAttachment(ctx, chatGUID, path, replyTo, audio)
+}
+
+// SetTapback adds or removes this account's tapback, given as an emoji, on a message.
+func (s *Service) SetTapback(ctx context.Context, chatGUID, target, emoji string, remove bool) error {
+	return s.client.Tapback(ctx, chatGUID, target, tapbackReaction(emoji), remove)
+}
+
+// Edit replaces the text of a message this account sent.
+func (s *Service) Edit(ctx context.Context, chatGUID, guid, text string) error {
+	return s.client.Edit(ctx, chatGUID, guid, text)
+}
+
+// Unsend retracts a message this account sent.
+func (s *Service) Unsend(ctx context.Context, chatGUID, guid string) error {
+	return s.client.Unsend(ctx, chatGUID, guid)
 }
 
 // Name is the contact name last seen for a handle, or the handle itself.
@@ -246,7 +424,7 @@ func (s *Service) MarkReadThrough(ctx context.Context, chatGUID, guid string) (b
 	s.lock.Lock()
 	chatID := s.chatIDs[chatGUID]
 	s.lock.Unlock()
-	messages, err := s.client.History(ctx, chatID, readCheckDepth)
+	messages, err := s.client.History(ctx, chatID, readCheckDepth, time.Time{}, time.Time{}, false)
 	if err != nil {
 		return false, err
 	}
@@ -266,7 +444,10 @@ func (s *Service) MarkReadThrough(ctx context.Context, chatGUID, guid string) (b
 }
 
 func (s *Service) notify(method string, params json.RawMessage) {
-	if method != imsg.NotifyMessage && method != imsg.NotifyOverflow && method != imsg.NotifyError {
+	switch method {
+	case imsg.NotifyMessage, imsg.NotifyOverflow, imsg.NotifyError,
+		imsg.NotifyBridgeEvent, imsg.NotifyBridgeOverflow, imsg.NotifyBridgeError:
+	default:
 		s.log.Debug().Str("method", method).Msg("Ignoring imsg notification")
 		return
 	}
@@ -291,24 +472,28 @@ func (s *Service) notify(method string, params json.RawMessage) {
 	}
 }
 
-func (s *Service) remember(m imsg.Message) Message {
+// remember records what a watched row says about its chat and sender, and returns the chat as it
+// is now when its name or members differ from what was known.
+func (s *Service) remember(m imsg.Message) (ChatChange, bool) {
 	s.lock.Lock()
+	defer s.lock.Unlock()
 	s.chatIDs[m.ChatGUID] = m.ChatID
 	if !m.IsFromMe && m.SenderName != "" {
 		s.names[m.Sender] = m.SenderName
 	}
-	s.lock.Unlock()
-	// imsg keeps U+FFFC where an attachment sits in the text; attachments aren't text.
-	text := strings.TrimSpace(strings.ReplaceAll(m.Text, "\uFFFC", ""))
-	return Message{
-		RowID:    m.ID,
-		GUID:     m.GUID,
-		ChatGUID: m.ChatGUID,
-		IsGroup:  m.IsGroup,
-		Sender:   m.Sender,
-		IsFromMe: m.IsFromMe,
-		Text:     text,
-		Time:     m.CreatedAt,
-		ReplyTo:  m.ReplyToGUID,
+	if !m.IsGroup {
+		return ChatChange{}, false
 	}
+	known, ok := s.chats[m.ChatGUID]
+	name := m.ChatName
+	if name == m.ChatIdent {
+		// imsg names an unnamed chat by its identifier.
+		name = ""
+	}
+	now := Chat{GUID: m.ChatGUID, Name: name, IsGroup: true, Participants: m.Participants, LastMessage: m.CreatedAt}
+	s.chats[m.ChatGUID] = now
+	if !ok || (known.Name == now.Name && slices.Equal(known.Participants, now.Participants)) {
+		return ChatChange{}, false
+	}
+	return ChatChange{Chat: now}, true
 }

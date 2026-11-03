@@ -5,6 +5,8 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	up "go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
@@ -40,7 +42,12 @@ var _ bridgev2.NetworkConnector = (*Connector)(nil)
 // events can load a login, whose client needs core, before Start runs.
 func (c *Connector) Init(bridge *bridgev2.Bridge) {
 	c.bridge = bridge
-	service, err := core.Start(bridge.Log.With().Str("component", "core").Logger(), c.Config.IMsgPath)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		bridge.Log.Fatal().Err(err).Msg("No home directory to find chat.db in")
+	}
+	chatDB := filepath.Join(home, "Library", "Messages", "chat.db")
+	service, err := core.Start(bridge.Log.With().Str("component", "core").Logger(), c.Config.IMsgPath, chatDB)
 	if err != nil {
 		bridge.Log.Fatal().Err(err).Msg("Failed to start imsg rpc")
 	}
@@ -81,7 +88,7 @@ func (c *Connector) GetConfig() (string, any, up.Upgrader) {
 }
 
 func (c *Connector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 1, 1
+	return 1, 2
 }
 
 func (c *Connector) LoadUserLogin(_ context.Context, login *bridgev2.UserLogin) error {
