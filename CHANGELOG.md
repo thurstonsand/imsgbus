@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-03
+
 ### Fixed
 
 - Backfilling older history no longer stops at a chat's oldest bridged message: imsg returned that message again as older than itself, and Beeper's bridge failed the page.
