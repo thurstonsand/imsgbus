@@ -2,10 +2,13 @@ package matrix
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+
+	"github.com/thurstonsand/imsgbus/internal/core"
 )
 
 // FetchMessages pages through a chat's history by time: backwards before the cursor, or the
@@ -30,6 +33,11 @@ func (c *Client) FetchMessages(ctx context.Context, params bridgev2.FetchMessage
 	resp := &bridgev2.FetchMessagesResponse{
 		Forward: params.Forward,
 		HasMore: len(messages) == params.Count,
+	}
+	if !before.IsZero() {
+		// imsg can return the message at the cursor itself, and bridgev2 fails a backwards page that
+		// holds nothing older than what it already bridged.
+		messages = slices.DeleteFunc(messages, func(m core.Message) bool { return !m.Time.Before(before) })
 	}
 	for _, msg := range messages {
 		converted, err := convertMessage(ctx, params.Portal, c.login.Bridge.Bot, msg)
