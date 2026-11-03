@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -97,8 +98,25 @@ func (c *Client) Err() error {
 	return c.exitErr
 }
 
-// Call sends one request and decodes its result into result, which may be nil.
-func (c *Client) Call(ctx context.Context, method string, params, result any) error {
+// Call sends one request and decodes its result into result, which may be nil. Each call is
+// logged with its outcome and duration, under ctx's logger when it has one.
+func (c *Client) Call(ctx context.Context, method string, params, result any) (err error) {
+	start := time.Now()
+	defer func() {
+		log := zerolog.Ctx(ctx)
+		if log.GetLevel() == zerolog.Disabled {
+			log = &c.log
+		}
+		entry := log.Info()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			entry = log.Warn().Err(err)
+			if rpcErr, ok := errors.AsType[*Error](err); ok {
+				entry = entry.Int("code", rpcErr.Code)
+			}
+		}
+		entry.Str("event", "imsg_call").Str("method", method).Bool("ok", err == nil).
+			Int64("duration_ms", time.Since(start).Milliseconds()).Msg("imsg call")
+	}()
 	c.lock.Lock()
 	if c.exitErr != nil {
 		c.lock.Unlock()

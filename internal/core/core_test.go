@@ -70,6 +70,10 @@ func fakeIMsg(scenario string) {
 					`{"id":1,"guid":"g1","chat_guid":"c","type":"edited","text":"fixed"}`,
 					`{"id":2,"guid":"g2","chat_guid":"c","type":"edited","text":""}`,
 					`{"id":3,"guid":"g3","chat_guid":"c","type":"unsent"}`,
+					`{"id":7,"guid":"g7","chat_guid":"c","text":"https://example.com","balloon_bundle_id":"com.apple.messages.URLBalloonProvider",` +
+						`"attachments":[{"transfer_name":"7AB00049.pluginPayloadAttachment","original_path":"/a/7AB00049.pluginPayloadAttachment"}]}`,
+					`{"id":8,"guid":"g8","chat_guid":"c","text":"\ufffc","attachments":[{"transfer_name":"cat.heic","original_path":"/a/cat.heic",` +
+						`"mime_type":"image/heic","converted_path":"/c/cat.png","converted_mime_type":"image/png","is_sticker":true}]}`,
 				} {
 					write(`{"jsonrpc":"2.0","method":"message","params":{"subscription":7,"message":` + m + `}}`)
 				}
@@ -157,7 +161,7 @@ func TestMarkReadThroughNeedsEveryInboundMessageSeen(t *testing.T) {
 	}
 }
 
-func TestWatchClassifiesTapbacksEditsAndUnsends(t *testing.T) {
+func TestWatchClassifiesEveryKindOfRow(t *testing.T) {
 	service := startFake(t, "mutations")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -171,10 +175,12 @@ func TestWatchClassifiesTapbacksEditsAndUnsends(t *testing.T) {
 			got = append(got, fmt.Sprintf("edit %s to %q", evt.GUID, evt.Text))
 		case core.Unsend:
 			got = append(got, "unsend "+evt.GUID)
+		case core.Message:
+			got = append(got, fmt.Sprintf("message %s %q from %s files %v", evt.GUID, evt.Text, evt.App, evt.Attachments))
 		default:
 			got = append(got, fmt.Sprintf("%T", evt))
 		}
-		if len(got) == 5 {
+		if len(got) == 7 {
 			cancel()
 		}
 	})
@@ -184,8 +190,25 @@ func TestWatchClassifiesTapbacksEditsAndUnsends(t *testing.T) {
 		`edit g1 to "fixed"`,
 		"unsend g2",
 		"unsend g3",
+		// A link's preview is Messages' own rendering, not a file anyone sent.
+		`message g7 "https://example.com" from com.apple.messages.URLBalloonProvider files []`,
+		`message g8 "" from  files [{cat.heic image/png /c/cat.png true}]`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestAddressSplitsTheFilterCategory(t *testing.T) {
+	for handle, want := range map[string][2]string{
+		"+14175413549(smsft_rm)": {"+14175413549", "smsft_rm"},
+		"97790(smsft)(smsft)":    {"97790", "smsft"},
+		"+18598593641(smsfp)":    {"+18598593641", "smsfp"},
+		"+15552013344":           {"+15552013344", ""},
+		"dana.w@example.com":     {"dana.w@example.com", ""},
+	} {
+		if address, category := core.Address(handle); [2]string{address, category} != want {
+			t.Errorf("Address(%q) = %q, %q; want %q, %q", handle, address, category, want[0], want[1])
+		}
 	}
 }

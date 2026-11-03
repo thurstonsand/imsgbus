@@ -31,6 +31,7 @@ func main() {
 		ctx := m.Log.WithContext(context.Background())
 		service := connector.Core()
 		go service.RunIndex(ctx)
+		go service.RunHeartbeat(ctx)
 		go func() {
 			err := mcp.Serve(ctx, connector.Config.MCP.Listen, connector.Config.MCP.Token, m.Version, service)
 			m.Log.Fatal().Err(err).Msg("MCP server stopped")

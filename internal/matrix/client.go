@@ -2,11 +2,14 @@ package matrix
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/nyaruka/phonenumbers"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/jsontime"
 	"maunium.net/go/mautrix/bridgev2"
@@ -84,10 +87,10 @@ func (c *Client) keep(ctx context.Context, name string, run func() error) {
 			return
 		}
 		if err == nil {
-			log.Warn().Msg("Watch fell behind; resuming")
+			log.Warn().Str("event", "watch_restart").Msg("Watch fell behind; resuming")
 			continue
 		}
-		log.Err(err).Msg("Watch ended; retrying")
+		log.Err(err).Str("event", "watch_restart").Msg("Watch ended; retrying")
 		select {
 		case <-ctx.Done():
 			return
@@ -119,6 +122,7 @@ func (c *Client) syncChats(ctx context.Context) {
 }
 
 func (c *Client) handle(evt core.Event) {
+	c.logInbound(evt)
 	switch evt := evt.(type) {
 	case core.Message:
 		c.cursor.start(evt.RowID)
@@ -181,6 +185,32 @@ func (c *Client) handle(evt core.Event) {
 	}
 }
 
+// logInbound records each event the watch hands to Beeper, with how long after it happened.
+func (c *Client) logInbound(evt core.Event) {
+	log := c.login.Log.Info().Str("event", "inbound")
+	var at time.Time
+	switch evt := evt.(type) {
+	case core.Message:
+		log = log.Str("kind", "message").Bool("from_me", evt.IsFromMe).Bool("group", evt.IsGroup).Int("files", len(evt.Attachments)).Str("app", evt.App)
+		at = evt.Time
+	case core.Tapback:
+		log = log.Str("kind", "tapback").Bool("from_me", evt.IsFromMe)
+		at = evt.Time
+	case core.Edit:
+		log = log.Str("kind", "edit").Bool("from_me", evt.IsFromMe)
+		at = evt.Time
+	case core.Unsend:
+		log = log.Str("kind", "unsend").Bool("from_me", evt.IsFromMe)
+		at = evt.Time
+	case core.ChatChange:
+		log = log.Str("kind", "chat_change")
+	}
+	if !at.IsZero() {
+		log = log.Int64("lag_ms", time.Since(at).Milliseconds())
+	}
+	log.Msg("Bridging event from iMessage")
+}
+
 func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 	sender := c.self()
 	if r.IsFromMe {
@@ -195,7 +225,8 @@ func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 	if r.Kind == core.Delivered {
 		evtType = bridgev2.RemoteEventDeliveryReceipt
 	}
-	zerolog.Ctx(ctx).Debug().Str("guid", r.GUID).Stringer("type", evtType).Bool("from_me", r.IsFromMe).Msg("Bridging receipt")
+	zerolog.Ctx(ctx).Info().Str("event", "receipt").Str("guid", r.GUID).Stringer("type", evtType).Bool("from_me", r.IsFromMe).
+		Int64("lag_ms", time.Since(r.Time).Milliseconds()).Msg("Bridging receipt from iMessage")
 	c.login.QueueRemoteEvent(&simplevent.Receipt{
 		Type:                evtType,
 		PortalKey:           c.portalKey(r.ChatGUID),
@@ -286,19 +317,52 @@ func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
 		info.Type = new(database.RoomTypeDM)
 		if len(chat.Participants) == 1 {
 			members.OtherUserID = networkid.UserID(chat.Participants[0])
+			// Messages files these under Transactions, Promotions or Unknown Senders.
+			if _, category := core.Address(chat.Participants[0]); category != "" {
+				info.UserLocal = &bridgev2.UserLocalPortalInfo{Tag: new(event.RoomTagLowPriority)}
+			}
 		}
 	}
 	return info
 }
 
 func (c *Client) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+	return userInfo(c.core, ghost), nil
+}
+
+// userInfo shows a handle as its contact, with their photo, or as its address written out.
+func userInfo(service *core.Service, ghost *bridgev2.Ghost) *bridgev2.UserInfo {
 	handle := string(ghost.ID)
-	name := c.core.Name(handle)
-	identifier := "tel:" + handle
-	if strings.Contains(handle, "@") {
-		identifier = "mailto:" + handle
+	address, _ := core.Address(handle)
+	name := service.Name(handle)
+	if name == handle {
+		name = displayAddress(address)
 	}
-	return &bridgev2.UserInfo{Name: &name, Identifiers: []string{identifier}}, nil
+	identifier := "tel:" + address
+	if strings.Contains(address, "@") {
+		identifier = "mailto:" + address
+	}
+	info := &bridgev2.UserInfo{Name: &name, Identifiers: []string{identifier}}
+	if photo := service.Photo(handle); photo != nil {
+		sum := sha256.Sum256(photo)
+		info.Avatar = &bridgev2.Avatar{
+			ID:  networkid.AvatarID(hex.EncodeToString(sum[:8])),
+			Get: func(context.Context) ([]byte, error) { return photo, nil },
+		}
+	} else if ghost.AvatarID != "" {
+		info.Avatar = &bridgev2.Avatar{Remove: true}
+	}
+	return info
+}
+
+// displayAddress writes a phone number the way it reads internationally, as "+1 555-201-3344";
+// anything else, such as an email or a short code, stays as it is.
+func displayAddress(address string) string {
+	number, err := phonenumbers.Parse(address, "US")
+	if err != nil || !phonenumbers.IsValidNumber(number) {
+		return address
+	}
+	return phonenumbers.Format(number, phonenumbers.INTERNATIONAL)
 }
 
 // Apple lets a sender edit a message for 15 minutes and unsend it for 2.

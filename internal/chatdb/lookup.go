@@ -19,6 +19,17 @@ type File struct {
 // ErrNoMessage is a message GUID chat.db doesn't have.
 var ErrNoMessage = errors.New("no such message")
 
+// LastRowID is the row ID of the newest message in chat.db.
+func LastRowID(ctx context.Context, path string) (int64, error) {
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = db.Close() }()
+	var row int64
+	return row, db.QueryRowContext(ctx, "SELECT coalesce(max(ROWID), 0) FROM message").Scan(&row)
+}
+
 // MessageChat returns the GUID of the chat a message is in, and the message's files.
 func MessageChat(ctx context.Context, path, guid string) (string, []File, error) {
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")

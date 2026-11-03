@@ -39,6 +39,8 @@ type Message struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	ReplyToGUID  string       `json:"reply_to_guid"`
 	Attachments  []Attachment `json:"attachments"`
+	// BalloonBundleID names the iMessage app that made the message, such as a link preview.
+	BalloonBundleID string `json:"balloon_bundle_id"`
 	// Type is "edited" or "unsent" for a mutation of an earlier row, empty for a new row.
 	Type string `json:"type"`
 
@@ -58,6 +60,7 @@ type Attachment struct {
 	OriginalPath  string `json:"original_path"`
 	ConvertedPath string `json:"converted_path"`
 	ConvertedMIME string `json:"converted_mime_type"`
+	IsSticker     bool   `json:"is_sticker"`
 }
 
 // Subscription notification methods. All but "message" and "bridge.event" end their

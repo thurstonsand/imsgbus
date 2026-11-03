@@ -20,7 +20,9 @@ type person struct {
 	first, last, nickname, organization string
 	phones, emails                      []string
 	linkID                              string
-	preferred                           bool
+	preferred, preferredPhoto           bool
+	// thumbnail and image are stored as Contacts stores them, behind their storage marker.
+	thumbnail, image []byte
 }
 
 // writeStore writes people to a store with Contacts' own table and column names, in WAL mode, and
@@ -41,7 +43,8 @@ func writeStore(t *testing.T, path string, people ...person) *sql.DB {
 		INSERT INTO Z_PRIMARYKEY VALUES (19, 'ABCDGroup'), (22, 'ABCDContact');
 		CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, ZDISPLAYFLAGS INTEGER,
 			ZPREFERREDFORLINKNAME INTEGER, ZFIRSTNAME VARCHAR, ZLASTNAME VARCHAR, ZMIDDLENAME VARCHAR,
-			ZNICKNAME VARCHAR, ZORGANIZATION VARCHAR, ZLINKID VARCHAR, ZNAME VARCHAR);
+			ZNICKNAME VARCHAR, ZORGANIZATION VARCHAR, ZLINKID VARCHAR, ZNAME VARCHAR,
+			ZPREFERREDFORLINKPHOTO INTEGER, ZTHUMBNAILIMAGEDATA BLOB, ZIMAGEDATA BLOB);
 		CREATE TABLE ZABCDPHONENUMBER (Z_PK INTEGER PRIMARY KEY, ZORDERINGINDEX INTEGER, ZOWNER INTEGER,
 			ZFULLNUMBER VARCHAR, ZLABEL VARCHAR);
 		CREATE TABLE ZABCDEMAILADDRESS (Z_PK INTEGER PRIMARY KEY, ZORDERINGINDEX INTEGER, ZOWNER INTEGER,
@@ -62,8 +65,10 @@ func addPerson(t *testing.T, db *sql.DB, p person) {
 		return s
 	}
 	res, err := db.Exec(`INSERT INTO ZABCDRECORD (Z_ENT, ZDISPLAYFLAGS, ZPREFERREDFORLINKNAME, ZFIRSTNAME,
-		ZLASTNAME, ZNICKNAME, ZORGANIZATION, ZLINKID) VALUES (22, 0, ?, ?, ?, ?, ?, ?)`,
-		p.preferred, nullable(p.first), nullable(p.last), nullable(p.nickname), nullable(p.organization), nullable(p.linkID))
+		ZLASTNAME, ZNICKNAME, ZORGANIZATION, ZLINKID, ZPREFERREDFORLINKPHOTO, ZTHUMBNAILIMAGEDATA, ZIMAGEDATA)
+		VALUES (22, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.preferred, nullable(p.first), nullable(p.last), nullable(p.nickname), nullable(p.organization), nullable(p.linkID),
+		p.preferredPhoto, p.thumbnail, p.image)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +147,47 @@ func TestHandleInTwoSourcesResolvesConsistently(t *testing.T) {
 	}
 }
 
+func TestPhotosReadInlineAndExternal(t *testing.T) {
+	inline := func(data string) []byte { return append([]byte{1}, data...) }
+	external := func(name string) []byte { return append(append([]byte{2}, name...), 0) }
+	dir := t.TempDir()
+	writeStore(t, filepath.Join(dir, "AddressBook-v22.abcddb"))
+	source := filepath.Join(dir, "Sources", "00-SOURCE")
+	writeStore(t, filepath.Join(source, "AddressBook-v22.abcddb"),
+		person{first: "Thumb", last: "Over Image", phones: []string{"555-301-0001"}, thumbnail: inline("thumbnail"), image: inline("full image")},
+		person{first: "External", last: "File", phones: []string{"555-301-0002"}, image: external("8044FDE1-C993")},
+		person{first: "Not", last: "Downloaded", phones: []string{"555-301-0003"}, thumbnail: external("0E04AA96-AAE8")},
+		person{first: "Linked", last: "Plain", phones: []string{"555-301-0004"}, linkID: "LINK-2", preferred: true, image: inline("plain card")},
+		person{first: "Linked", last: "Chosen", phones: []string{"555-301-0005"}, linkID: "LINK-2", preferredPhoto: true, image: inline("chosen card")},
+		person{first: "No", last: "Photo", phones: []string{"555-301-0006"}},
+	)
+	data := filepath.Join(source, ".AddressBook-v22_SUPPORT", "_EXTERNAL_DATA")
+	if err := os.MkdirAll(data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "8044FDE1-C993"), []byte("external image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := contacts.Open(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for handle, want := range map[string]string{
+		"+15553010001": "thumbnail",
+		"+15553010002": "external image",
+		"+15553010003": "",
+		// Linked cards take the photo of the card preferred for it, not the one preferred for the name.
+		"+15553010004": "chosen card",
+		"+15553010006": "",
+	} {
+		contact, ok := catalog.Lookup(handle)
+		if !ok || string(contact.Photo) != want {
+			t.Errorf("Lookup(%s) = photo %q, %v; want %q", handle, contact.Photo, ok, want)
+		}
+	}
+}
+
 func TestPhoneFormatsMatch(t *testing.T) {
 	catalog, _ := addressBook(t, []person{
 		{first: "Ines", last: "Calloway", phones: []string{"(555) 123-4567"}},
@@ -210,16 +256,17 @@ func TestFullNameBeatsFirstNameAmbiguity(t *testing.T) {
 
 func TestWatchReloadsOnChange(t *testing.T) {
 	catalog, dbs := addressBook(t, []person{{first: "Ines", last: "Calloway", phones: []string{"5551234567"}}})
-	if err := catalog.Watch(t.Context(), zerolog.Nop()); err != nil {
+	reloaded := make(chan struct{}, 1)
+	if err := catalog.Watch(t.Context(), zerolog.Nop(), func() { reloaded <- struct{}{} }); err != nil {
 		t.Fatal(err)
 	}
 	addPerson(t, dbs[0], person{first: "Theo", last: "Brandt", phones: []string{"5557654321"}})
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if name, _ := catalog.Name("+15557654321"); name == "Theo Brandt" {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
+	select {
+	case <-reloaded:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the catalog never reloaded after a card was added")
 	}
-	t.Fatal("the catalog never picked up a card added after it loaded")
+	if name, _ := catalog.Name("+15557654321"); name != "Theo Brandt" {
+		t.Fatalf("Name(added card's number) = %q after the reload; want Theo Brandt", name)
+	}
 }

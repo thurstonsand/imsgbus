@@ -41,6 +41,8 @@ type Contact struct {
 	Nickname     string
 	Organization string
 	Handles      []Handle
+	// Photo is the contact's picture as Contacts crops it, as JPEG or PNG; nil when it has none.
+	Photo []byte
 
 	// fullNames, nicknames and firstNames are the folded names Resolve matches, from every card.
 	fullNames, nicknames, firstNames []string
@@ -94,16 +96,29 @@ func Open(ctx context.Context, dir string) (*Catalog, error) {
 	return c, c.Reload(ctx)
 }
 
-// Name is the name of the contact that lists handle. A handle on several different contacts has
-// no name: picking one would make the name flip between them.
-func (c *Catalog) Name(handle string) (string, bool) {
+// Lookup is the contact that lists handle. A handle on several different contacts has none:
+// picking one would make its name flip between them.
+func (c *Catalog) Lookup(handle string) (Contact, bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	owners := c.owners[Normalize(handle)]
 	if len(owners) != 1 {
-		return "", false
+		return Contact{}, false
 	}
-	return c.contacts[owners[0]].Name, true
+	return c.contacts[owners[0]], true
+}
+
+// Len is how many contacts the catalog holds.
+func (c *Catalog) Len() int {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return len(c.contacts)
+}
+
+// Name is the name of the contact Lookup finds for handle.
+func (c *Catalog) Name(handle string) (string, bool) {
+	contact, ok := c.Lookup(handle)
+	return contact.Name, ok
 }
 
 // Resolve finds the one contact a name means, case- and accent-insensitively. It tries full
@@ -169,9 +184,10 @@ func (c *Catalog) Reload(ctx context.Context) error {
 	return nil
 }
 
-// Watch reloads the catalog whenever a store changes, until ctx ends. A failed reload keeps the
-// previous catalog and is logged, since the next change retries it.
-func (c *Catalog) Watch(ctx context.Context, log zerolog.Logger) error {
+// Watch reloads the catalog whenever a store changes, and calls reloaded after each reload, until
+// ctx ends. A failed reload keeps the previous catalog and is logged, since the next change
+// retries it.
+func (c *Catalog) Watch(ctx context.Context, log zerolog.Logger, reloaded func()) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -197,6 +213,7 @@ func (c *Catalog) Watch(ctx context.Context, log zerolog.Logger) error {
 					log.Err(err).Msg("Reloading contacts; keeping the previous catalog")
 					continue
 				}
+				reloaded()
 				// A source added since the last load has a store directory nobody watches yet.
 				if err := c.watchStores(watcher); err != nil {
 					log.Err(err).Msg("Watching contacts")
@@ -227,9 +244,10 @@ type card struct {
 	name, first, middle, last, nickname, organization string
 	// linkID joins the cards Contacts has linked as one person, across sources.
 	linkID string
-	// preferred marks the linked card whose name the person shows.
-	preferred bool
-	handles   []Handle
+	// preferred and preferredPhoto mark the linked card whose name and photo the person shows.
+	preferred, preferredPhoto bool
+	photo                     []byte
+	handles                   []Handle
 }
 
 func readStore(ctx context.Context, path string) ([]card, error) {
@@ -249,7 +267,8 @@ func readStore(ctx context.Context, path string) ([]card, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT Z_PK, coalesce(ZFIRSTNAME, ''), coalesce(ZMIDDLENAME, ''), coalesce(ZLASTNAME, ''),
 			coalesce(ZNICKNAME, ''), coalesce(ZORGANIZATION, ''), coalesce(ZDISPLAYFLAGS, 0),
-			coalesce(ZLINKID, ''), coalesce(ZPREFERREDFORLINKNAME, 0)
+			coalesce(ZLINKID, ''), coalesce(ZPREFERREDFORLINKNAME, 0), coalesce(ZPREFERREDFORLINKPHOTO, 0),
+			coalesce(ZTHUMBNAILIMAGEDATA, ZIMAGEDATA)
 		FROM ZABCDRECORD
 		WHERE Z_ENT = (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ABCDContact')
 		ORDER BY Z_PK`)
@@ -262,8 +281,12 @@ func readStore(ctx context.Context, path string) ([]card, error) {
 	for rows.Next() {
 		var pk, flags int64
 		var cd card
-		if err := rows.Scan(&pk, &cd.first, &cd.middle, &cd.last, &cd.nickname, &cd.organization, &flags, &cd.linkID, &cd.preferred); err != nil {
+		var image []byte
+		if err = rows.Scan(&pk, &cd.first, &cd.middle, &cd.last, &cd.nickname, &cd.organization, &flags, &cd.linkID, &cd.preferred, &cd.preferredPhoto, &image); err != nil {
 			return nil, err
+		}
+		if cd.photo, err = readImage(path, image); err != nil {
+			return nil, fmt.Errorf("photo of contact %d: %w", pk, err)
 		}
 		cd.name = strings.TrimSpace(cd.first + " " + cd.last)
 		// Bit 0 of the display flags is Contacts' "show as company".
@@ -295,6 +318,35 @@ func readStore(ctx context.Context, path string) ([]card, error) {
 	}
 	// A card without handles can neither name a sender nor be sent to.
 	return slices.DeleteFunc(cards, func(cd card) bool { return len(cd.handles) == 0 }), nil
+}
+
+// readImage reads a Core Data image attribute stored beside the database when it is large: 0x01
+// and the image, or 0x02 and the NUL-terminated name of its file under the store's external
+// data directory. A file Contacts hasn't synced down yet reads as no image.
+func readImage(store string, blob []byte) ([]byte, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	switch blob[0] {
+	case 1:
+		return blob[1:], nil
+	case 2:
+		name := strings.TrimRight(string(blob[1:]), "\x00")
+		support := "." + strings.TrimSuffix(filepath.Base(store), filepath.Ext(store)) + "_SUPPORT"
+		root, err := os.OpenRoot(filepath.Join(filepath.Dir(store), support, "_EXTERNAL_DATA"))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		} else if err != nil {
+			return nil, err
+		}
+		defer func() { _ = root.Close() }()
+		data, err := root.ReadFile(name)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return data, err
+	}
+	return nil, fmt.Errorf("unknown image storage marker %#x", blob[0])
 }
 
 func readHandles(ctx context.Context, tx *sql.Tx, query string, cards []card, index map[int64]int) error {
@@ -375,6 +427,9 @@ func merge(cards []card) []Contact {
 		contact := &contacts[g]
 		if cd.preferred {
 			contact.Name, contact.Nickname, contact.Organization = cd.name, cd.nickname, cd.organization
+		}
+		if cd.photo != nil && (contact.Photo == nil || cd.preferredPhoto) {
+			contact.Photo = cd.photo
 		}
 		for _, h := range cd.handles {
 			if !slices.ContainsFunc(contact.Handles, func(o Handle) bool { return o.Value == h.Value }) {

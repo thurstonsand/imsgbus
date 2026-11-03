@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -25,15 +26,21 @@ func convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev
 		if err != nil {
 			return nil, err
 		}
+		evtType := event.EventMessage
+		if file.Sticker && content.MsgType == event.MsgImage {
+			evtType, content.MsgType = event.EventSticker, ""
+		}
 		converted.Parts = append(converted.Parts, &bridgev2.ConvertedMessagePart{
 			ID:      networkid.PartID(fmt.Sprintf("file-%d", i)),
-			Type:    event.EventMessage,
+			Type:    evtType,
 			Content: content,
 		})
 	}
 	if msg.Text != "" || len(converted.Parts) == 0 {
 		content := &event.MessageEventContent{MsgType: event.MsgText, Body: msg.Text}
 		if msg.Text == "" {
+			zerolog.Ctx(ctx).Warn().Str("event", "unsupported").Str("guid", msg.GUID).Str("app", msg.App).
+				Msg("Bridging a message with neither text nor files as unsupported")
 			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Unsupported message; open it on an Apple device"}
 		}
 		converted.Parts = append(converted.Parts, &bridgev2.ConvertedMessagePart{ID: textPart, Type: event.EventMessage, Content: content})
@@ -43,6 +50,7 @@ func convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev
 
 func convertFile(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, file core.Attachment) (*event.MessageEventContent, error) {
 	if file.Path == "" {
+		zerolog.Ctx(ctx).Info().Str("event", "attachment_missing").Str("mime", file.MIME).Msg("Attachment isn't on the Mac")
 		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: file.Name + " isn't downloaded on the Mac yet; open it on an Apple device"}, nil
 	}
 	data, err := os.ReadFile(file.Path)

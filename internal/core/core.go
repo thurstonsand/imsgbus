@@ -454,6 +454,12 @@ func (s *Service) ContactName(handle string) (string, bool) {
 	return s.contacts.Name(handle)
 }
 
+// Photo is the picture of the contact a handle belongs to, or nil when it has none.
+func (s *Service) Photo(handle string) []byte {
+	contact, _ := s.contacts.Lookup(handle)
+	return contact.Photo
+}
+
 // Person finds the one contact a name means; see contacts.Catalog.Resolve.
 func (s *Service) Person(name string) (contacts.Contact, error) {
 	return s.contacts.Resolve(name)

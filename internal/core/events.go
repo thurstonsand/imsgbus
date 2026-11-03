@@ -23,6 +23,9 @@ type Message struct {
 	Time        time.Time
 	ReplyTo     string
 	Attachments []Attachment
+	// App is the iMessage app that made the message, such as
+	// "com.apple.messages.URLBalloonProvider" for a link, or empty for a plain message.
+	App string
 }
 
 // Attachment is a file on a message. Path is empty when the file isn't on this Mac, such as one
@@ -31,7 +34,13 @@ type Attachment struct {
 	Name string
 	MIME string
 	Path string
+	// Sticker is an image placed as a sticker, such as a Genmoji or Memoji sent on its own.
+	Sticker bool
 }
+
+// linkPreview is the attachment suffix of the preview Messages renders for a link; the link
+// itself is in the text.
+const linkPreview = ".pluginPayloadAttachment"
 
 // Tapback is someone adding or removing their tapback on a message. One person has at most one
 // tapback on a message, so a new one replaces theirs.
@@ -77,6 +86,19 @@ func (Edit) event()       {}
 func (Unsend) event()     {}
 func (ChatChange) event() {}
 
+// Address splits a handle into the phone number or email it is and the category Messages' text
+// message filter sorted its sender into, which chat.db appends in parentheses: "smsfp" for
+// promotions, "smsft" for transactions (with "_fi" finance, "_or" orders and "_rm" reminders),
+// "filtered" for unknown senders. category is empty for anyone the filter left alone.
+func Address(handle string) (address, category string) {
+	address, rest, filtered := strings.Cut(handle, "(")
+	if !filtered {
+		return handle, ""
+	}
+	category, _, _ = strings.Cut(rest, ")")
+	return address, category
+}
+
 // classicTapbacks maps imsg's tapback types to the emoji they show as, and back.
 var classicTapbacks = map[string]string{
 	"love":     "❤️",
@@ -100,7 +122,10 @@ func tapbackReaction(emoji string) string {
 func toMessage(m imsg.Message) Message {
 	files := make([]Attachment, 0, len(m.Attachments))
 	for _, a := range m.Attachments {
-		file := Attachment{Name: a.TransferName, MIME: a.MIMEType, Path: a.OriginalPath}
+		if strings.HasSuffix(a.TransferName, linkPreview) {
+			continue
+		}
+		file := Attachment{Name: a.TransferName, MIME: a.MIMEType, Path: a.OriginalPath, Sticker: a.IsSticker}
 		if a.ConvertedPath != "" {
 			file.Path, file.MIME = a.ConvertedPath, a.ConvertedMIME
 		}
@@ -121,6 +146,7 @@ func toMessage(m imsg.Message) Message {
 		Time:        m.CreatedAt,
 		ReplyTo:     m.ReplyToGUID,
 		Attachments: files,
+		App:         m.BalloonBundleID,
 	}
 }
 

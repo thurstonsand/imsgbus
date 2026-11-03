@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"runtime"
 	"time"
 
+	"github.com/thurstonsand/imsgbus/internal/chatdb"
 	"github.com/thurstonsand/imsgbus/internal/contacts"
 	"github.com/thurstonsand/imsgbus/internal/search"
 )
@@ -76,4 +78,37 @@ func (s *Service) index(ctx context.Context) error {
 
 func document(rowID int64, guid, chatGUID, sender string, isFromMe bool, at time.Time, text string) search.Document {
 	return search.Document{RowID: rowID, GUID: guid, ChatGUID: chatGUID, Sender: contacts.Normalize(sender), IsFromMe: isFromMe, Time: at, Text: text}
+}
+
+// heartbeatEvery is how often RunHeartbeat reports, so a quiet log still shows imsgbus alive.
+const heartbeatEvery = 5 * time.Minute
+
+// RunHeartbeat logs how far behind chat.db the search index is, and how much imsgbus holds, every
+// heartbeatEvery until ctx ends.
+func (s *Service) RunHeartbeat(ctx context.Context) {
+	started := time.Now()
+	ticker := time.NewTicker(heartbeatEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		entry := s.log.Info().Str("event", "heartbeat")
+		if row, err := chatdb.LastRowID(ctx, s.chatDB); err != nil {
+			entry = entry.AnErr("chat_db_error", err)
+		} else {
+			entry = entry.Int64("chat_db_row", row)
+		}
+		if row, err := s.search.LastRowID(ctx); err != nil {
+			entry = entry.AnErr("index_error", err)
+		} else {
+			entry = entry.Int64("index_row", row)
+		}
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		entry.Int("contacts", s.contacts.Len()).Int("goroutines", runtime.NumGoroutine()).
+			Uint64("heap_mb", mem.HeapAlloc>>20).Int64("uptime_s", int64(time.Since(started).Seconds())).Msg("Heartbeat")
+	}
 }

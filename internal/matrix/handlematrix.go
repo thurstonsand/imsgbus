@@ -89,7 +89,7 @@ func (c *Client) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.
 		return nil
 	}
 	marked, err := c.core.MarkReadThrough(ctx, string(receipt.Portal.ID), string(receipt.ExactMessage.ID))
-	zerolog.Ctx(ctx).Debug().Bool("marked_read", marked).Msg("Handled read receipt")
+	zerolog.Ctx(ctx).Info().Str("event", "read_receipt").Bool("marked_read", marked).Msg("Handled read receipt from Beeper")
 	return err
 }
 
