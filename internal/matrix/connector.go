@@ -163,6 +163,6 @@ func (c *Connector) LoadUserLogin(_ context.Context, login *bridgev2.UserLogin) 
 	if !ok {
 		return fmt.Errorf("login %s has metadata of type %T", login.ID, login.Metadata)
 	}
-	login.Client = &Client{login: login, core: c.core, cursor: newCursor(login, meta)}
+	login.Client = &Client{login: login, core: c.core, cursor: newCursor(login, meta), deleting: map[string]bool{}}
 	return nil
 }

@@ -30,6 +30,9 @@ type Client struct {
 
 	lock   sync.Mutex
 	cancel context.CancelFunc
+	// deleting holds the chats Beeper is deleting, whose deletion in Messages the chat watch
+	// would otherwise bring back to delete again.
+	deleting map[string]bool
 }
 
 var (
@@ -40,6 +43,7 @@ var (
 	_ bridgev2.EditHandlingNetworkAPI        = (*Client)(nil)
 	_ bridgev2.RedactionHandlingNetworkAPI   = (*Client)(nil)
 	_ bridgev2.BackfillingNetworkAPI         = (*Client)(nil)
+	_ bridgev2.DeleteChatHandlingNetworkAPI  = (*Client)(nil)
 )
 
 const watchRetryDelay = 5 * time.Second
@@ -67,6 +71,9 @@ func (c *Client) Connect(ctx context.Context) {
 	})
 	go c.keep(ctx, "typing watch", func() error {
 		return c.core.WatchTyping(ctx, func(t core.Typing) { c.handleTyping(t) })
+	})
+	go c.keep(ctx, "chat watch", func() error {
+		return c.core.WatchChats(ctx, func(s core.ChatState) { c.handleChatState(ctx, s) })
 	})
 }
 
@@ -108,17 +115,56 @@ func (c *Client) syncChats(ctx context.Context) {
 		return
 	}
 	for _, chat := range chats {
-		c.login.QueueRemoteEvent(&simplevent.ChatResync{
-			Type:            bridgev2.RemoteEventChatResync,
-			PortalKey:       c.portalKey(chat.GUID),
-			CreatePortal:    true,
-			GetChatInfoFunc: c.GetChatInfo,
-			LatestMessageTS: chat.LastMessage,
-			CheckNeedsBackfillFunc: func(_ context.Context, latest *database.Message) (bool, error) {
-				return latest == nil, nil
-			},
-		})
+		c.bringIn(chat.GUID, chat.LastMessage)
 	}
+}
+
+// bringIn creates a chat's portal if it has none, with its history, and refreshes its info.
+func (c *Client) bringIn(chatGUID string, lastMessage time.Time) {
+	c.login.QueueRemoteEvent(&simplevent.ChatResync{
+		Type:            bridgev2.RemoteEventChatResync,
+		PortalKey:       c.portalKey(chatGUID),
+		CreatePortal:    true,
+		GetChatInfoFunc: c.GetChatInfo,
+		LatestMessageTS: lastMessage,
+		CheckNeedsBackfillFunc: func(_ context.Context, latest *database.Message) (bool, error) {
+			return latest == nil, nil
+		},
+	})
+}
+
+// handleChatState deletes a deleted chat's portal, and brings back a chat recovered from Recently
+// Deleted, with the history it got back.
+func (c *Client) handleChatState(ctx context.Context, s core.ChatState) {
+	log := zerolog.Ctx(ctx).With().Str("event", "chat_state").Str("chat_guid", s.GUID).Bool("deleted", s.Deleted).Logger()
+	if !s.Deleted {
+		log.Info().Msg("Bringing in a chat recovered in iMessage, or new to it")
+		c.bringIn(s.GUID, time.Time{})
+		return
+	}
+	c.lock.Lock()
+	ours := c.deleting[s.GUID]
+	delete(c.deleting, s.GUID)
+	c.lock.Unlock()
+	if ours {
+		return
+	}
+	// Looking a portal up by key creates it, so only an existing room is deleted.
+	portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, c.portalKey(s.GUID))
+	if err != nil {
+		log.Err(err).Msg("Failed to look up the portal of a deleted chat")
+		return
+	}
+	if portal == nil || portal.MXID == "" {
+		return
+	}
+	log.Info().Msg("Deleting a chat deleted in iMessage")
+	c.login.QueueRemoteEvent(&simplevent.ChatDelete{
+		Type:      bridgev2.RemoteEventChatDelete,
+		PortalKey: portal.PortalKey,
+		Timestamp: time.Now(),
+		OnlyForMe: true,
+	})
 }
 
 func (c *Client) handle(evt core.Event) {
@@ -191,19 +237,20 @@ func (c *Client) logInbound(evt core.Event) {
 	var at time.Time
 	switch evt := evt.(type) {
 	case core.Message:
-		log = log.Str("kind", "message").Bool("from_me", evt.IsFromMe).Bool("group", evt.IsGroup).Int("files", len(evt.Attachments)).Str("app", evt.App)
+		log = log.Str("kind", "message").Str("chat_guid", evt.ChatGUID).Str("guid", evt.GUID).Str("sender", evt.Sender).Bool("from_me", evt.IsFromMe).
+			Bool("group", evt.IsGroup).Int("files", len(evt.Attachments)).Str("app", evt.App)
 		at = evt.Time
 	case core.Tapback:
-		log = log.Str("kind", "tapback").Bool("from_me", evt.IsFromMe)
+		log = log.Str("kind", "tapback").Str("chat_guid", evt.ChatGUID).Str("guid", evt.GUID).Str("target", evt.Target).Str("sender", evt.Sender).Bool("from_me", evt.IsFromMe)
 		at = evt.Time
 	case core.Edit:
-		log = log.Str("kind", "edit").Bool("from_me", evt.IsFromMe)
+		log = log.Str("kind", "edit").Str("chat_guid", evt.ChatGUID).Str("guid", evt.GUID).Str("sender", evt.Sender).Bool("from_me", evt.IsFromMe)
 		at = evt.Time
 	case core.Unsend:
-		log = log.Str("kind", "unsend").Bool("from_me", evt.IsFromMe)
+		log = log.Str("kind", "unsend").Str("chat_guid", evt.ChatGUID).Str("guid", evt.GUID).Str("sender", evt.Sender).Bool("from_me", evt.IsFromMe)
 		at = evt.Time
 	case core.ChatChange:
-		log = log.Str("kind", "chat_change")
+		log = log.Str("kind", "chat_change").Str("chat_guid", evt.Chat.GUID)
 	}
 	if !at.IsZero() {
 		log = log.Int64("lag_ms", time.Since(at).Milliseconds())
@@ -225,7 +272,7 @@ func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 	if r.Kind == core.Delivered {
 		evtType = bridgev2.RemoteEventDeliveryReceipt
 	}
-	zerolog.Ctx(ctx).Info().Str("event", "receipt").Str("guid", r.GUID).Stringer("type", evtType).Bool("from_me", r.IsFromMe).
+	zerolog.Ctx(ctx).Info().Str("event", "receipt").Str("chat_guid", r.ChatGUID).Str("guid", r.GUID).Stringer("type", evtType).Bool("from_me", r.IsFromMe).
 		Int64("lag_ms", time.Since(r.Time).Milliseconds()).Msg("Bridging receipt from iMessage")
 	c.login.QueueRemoteEvent(&simplevent.Receipt{
 		Type:                evtType,
@@ -378,7 +425,7 @@ func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomF
 		Caption:   event.CapLevelPartialSupport,
 	}
 	return &event.RoomFeatures{
-		ID: "house.thurstons.imsgbus.capabilities.v3",
+		ID: "house.thurstons.imsgbus.capabilities.v4",
 		File: event.FileFeatureMap{
 			event.MsgImage:    file,
 			event.MsgVideo:    file,
@@ -395,5 +442,6 @@ func (c *Client) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomF
 		ReactionCount:       1,
 		ReadReceipts:        true,
 		TypingNotifications: true,
+		DeleteChat:          true,
 	}
 }

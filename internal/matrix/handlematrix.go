@@ -89,7 +89,7 @@ func (c *Client) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.
 		return nil
 	}
 	marked, err := c.core.MarkReadThrough(ctx, string(receipt.Portal.ID), string(receipt.ExactMessage.ID))
-	zerolog.Ctx(ctx).Info().Str("event", "read_receipt").Bool("marked_read", marked).Msg("Handled read receipt from Beeper")
+	zerolog.Ctx(ctx).Info().Str("event", "read_receipt").Str("chat_guid", string(receipt.Portal.ID)).Str("guid", string(receipt.ExactMessage.ID)).Bool("marked_read", marked).Msg("Handled read receipt from Beeper")
 	return err
 }
 
@@ -126,4 +126,24 @@ func (c *Client) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.Ma
 		return bridgev2.ErrUnsupportedMessageType
 	}
 	return c.core.Unsend(ctx, string(msg.Portal.ID), string(msg.TargetMessage.ID))
+}
+
+// HandleMatrixDeleteChat deletes the chat in Messages, for this account only: iMessage can't
+// delete a chat for anyone else.
+func (c *Client) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev2.MatrixDeleteChat) error {
+	if msg.Content.DeleteForEveryone {
+		return bridgev2.ErrDeleteChatNotSupported
+	}
+	guid := string(msg.Portal.ID)
+	c.lock.Lock()
+	c.deleting[guid] = true
+	c.lock.Unlock()
+	err := c.core.DeleteChat(ctx, guid)
+	if err != nil {
+		c.lock.Lock()
+		delete(c.deleting, guid)
+		c.lock.Unlock()
+	}
+	zerolog.Ctx(ctx).Info().Str("event", "chat_delete").Str("chat_guid", guid).Err(err).Msg("Deleted chat from Beeper in iMessage")
+	return err
 }

@@ -294,6 +294,20 @@ func (s *Service) WatchReceipts(ctx context.Context, handle func(Receipt)) error
 	})
 }
 
+// ChatState is a chat being deleted, or a deleted chat coming back.
+type ChatState = chatdb.ChatState
+
+// WatchChats calls handle for every chat already deleted, then for every chat deleted or brought
+// back, until ctx ends.
+func (s *Service) WatchChats(ctx context.Context, handle func(ChatState)) error {
+	return chatdb.WatchChats(ctx, s.chatDB, handle)
+}
+
+// DeleteChat erases a chat and its messages from Messages, skipping Recently Deleted.
+func (s *Service) DeleteChat(ctx context.Context, chatGUID string) error {
+	return s.client.ChatsDelete(ctx, chatGUID)
+}
+
 // NewMessageGUID returns a GUID for SendText, for callers that must know it before sending.
 func NewMessageGUID() string { return uuid.NewString() }
 

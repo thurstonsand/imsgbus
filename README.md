@@ -38,6 +38,8 @@ Configure a `json` file writer under `logging` to keep a log worth querying. Eac
 | `inbound` | an iMessage message, tapback, edit, unsend or group change heads to Beeper | `kind`, `from_me`, `lag_ms` since it happened |
 | `receipt` | a delivery or read from iMessage heads to Beeper | `type`, `from_me`, `lag_ms` |
 | `read_receipt` | Beeper reports you read a chat | `marked_read`: whether iMessage was told |
+| `chat_state` | a chat deleted in iMessage leaves Beeper, or one recovered comes back | `chat_guid`, `deleted` |
+| `chat_delete` | a chat deleted in Beeper is deleted in iMessage | `error` on failure |
 | `imsg_call` | imsg answers any request | `method`, `ok`, `duration_ms`, and `code` on failure; Beeper's `portal_id` or the MCP `tool` that asked |
 | `mcp_tool` | an agent's tool call finishes | `tool`, `ok`, `duration_ms`, `error` |
 | `unsupported` | a message with neither text nor files reaches Beeper as a placeholder | `guid`, and the iMessage `app` that made it |

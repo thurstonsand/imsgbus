@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -61,6 +62,12 @@ func logCalls(log zerolog.Logger) sdk.Middleware {
 			entry := toolLog.Info()
 			if failure != nil {
 				entry = toolLog.Warn().Err(failure)
+			}
+			// Arguments name the chats and people a call was about; the text sent stays out of the log.
+			var args map[string]any
+			if json.Unmarshal(params.Arguments, &args) == nil {
+				delete(args, "text")
+				entry = entry.Any("args", args)
 			}
 			entry.Str("event", "mcp_tool").Bool("ok", failure == nil).Int64("duration_ms", time.Since(start).Milliseconds()).Msg("MCP tool call")
 			return result, err

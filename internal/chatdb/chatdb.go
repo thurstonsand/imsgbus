@@ -1,5 +1,5 @@
 // Package chatdb reads Messages' chat.db, read-only, for what imsg doesn't report: when a message
-// was delivered and when it was read, on either side.
+// was delivered and when it was read, on either side, and when a chat was deleted or came back.
 package chatdb
 
 import (
@@ -66,6 +66,13 @@ func (r row) settled(cutoff int64) bool {
 // Watch reports every delivery and read of a recent message until ctx ends. Changes that happen
 // while nothing watches are not reported.
 func Watch(ctx context.Context, path string, report func(Change)) error {
+	w := &watch{report: report, pending: make(map[int64]row)}
+	return follow(ctx, path, w.start, w.check)
+}
+
+// follow calls start on a read-only connection to chat.db, then check whenever another connection
+// has written to it, until ctx ends or either fails.
+func follow(ctx context.Context, path string, start, check func(context.Context, *sql.Conn) error) error {
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
 	if err != nil {
 		return err
@@ -88,8 +95,11 @@ func Watch(ctx context.Context, path string, report func(Change)) error {
 		return err
 	}
 
-	w := &watch{conn: conn, report: report, pending: make(map[int64]row)}
-	if err := w.start(ctx); err != nil {
+	var version int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA data_version").Scan(&version); err != nil {
+		return err
+	}
+	if err := start(ctx, conn); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(fallbackPoll)
@@ -106,18 +116,24 @@ func Watch(ctx context.Context, path string, report func(Change)) error {
 			}
 		case <-ticker.C:
 		}
-		if err := w.check(ctx); err != nil {
+		var now int64
+		if err := conn.QueryRowContext(ctx, "PRAGMA data_version").Scan(&now); err != nil {
+			return err
+		}
+		if now == version {
+			continue
+		}
+		version = now
+		if err := check(ctx, conn); err != nil {
 			return err
 		}
 	}
 }
 
 type watch struct {
-	conn    *sql.Conn
 	report  func(Change)
 	pending map[int64]row
 	maxRow  int64
-	version int64
 }
 
 const rowColumns = `m.ROWID, m.guid, c.guid, m.is_from_me, m.date, m.date_delivered, m.is_read, m.date_read
@@ -125,15 +141,12 @@ const rowColumns = `m.ROWID, m.guid, c.guid, m.is_from_me, m.date, m.date_delive
 	JOIN chat_message_join j ON j.message_id = m.ROWID
 	JOIN chat c ON c.ROWID = j.chat_id`
 
-func (w *watch) start(ctx context.Context) error {
-	if err := w.conn.QueryRowContext(ctx, "SELECT coalesce(max(ROWID), 0) FROM message").Scan(&w.maxRow); err != nil {
-		return err
-	}
-	if err := w.conn.QueryRowContext(ctx, "PRAGMA data_version").Scan(&w.version); err != nil {
+func (w *watch) start(ctx context.Context, conn *sql.Conn) error {
+	if err := conn.QueryRowContext(ctx, "SELECT coalesce(max(ROWID), 0) FROM message").Scan(&w.maxRow); err != nil {
 		return err
 	}
 	// The second clause matches Messages' own partial index of unread messages.
-	return w.each(ctx, `SELECT `+rowColumns+`
+	return each(ctx, conn, `SELECT `+rowColumns+`
 		WHERE (m.is_from_me = 1 AND m.date > ? AND m.is_read = 0)
 		   OR (m.is_read = 0 AND m.is_finished = 1 AND m.is_from_me = 0)`,
 		[]any{cutoff()}, func(id int64, r row) { w.pending[id] = r })
@@ -143,29 +156,20 @@ func cutoff() int64 { return appleNanos(time.Now().Add(-pendingWindow)) }
 
 // check re-reads only what may have changed: rows added since the last check, and the pending
 // rows by primary key.
-func (w *watch) check(ctx context.Context) error {
-	var version int64
-	if err := w.conn.QueryRowContext(ctx, "PRAGMA data_version").Scan(&version); err != nil {
-		return err
-	}
-	if version == w.version {
-		return nil
-	}
-	w.version = version
-
+func (w *watch) check(ctx context.Context, conn *sql.Conn) error {
 	if len(w.pending) > 0 {
 		ids := make([]string, 0, len(w.pending))
 		for id := range w.pending {
 			ids = append(ids, strconv.FormatInt(id, 10))
 		}
-		err := w.each(ctx, `SELECT `+rowColumns+` WHERE m.ROWID IN (`+strings.Join(ids, ",")+`)`, nil,
+		err := each(ctx, conn, `SELECT `+rowColumns+` WHERE m.ROWID IN (`+strings.Join(ids, ",")+`)`, nil,
 			func(id int64, r row) { w.update(id, w.pending[id], r) })
 		if err != nil {
 			return err
 		}
 	}
 	// A new row may already be delivered or read by the time it is seen.
-	return w.each(ctx, `SELECT `+rowColumns+` WHERE m.ROWID > ?`, []any{w.maxRow}, func(id int64, r row) {
+	return each(ctx, conn, `SELECT `+rowColumns+` WHERE m.ROWID > ?`, []any{w.maxRow}, func(id int64, r row) {
 		w.maxRow = max(w.maxRow, id)
 		w.update(id, row{isFromMe: r.isFromMe}, r)
 	})
@@ -189,8 +193,8 @@ func (w *watch) update(id int64, was, now row) {
 	}
 }
 
-func (w *watch) each(ctx context.Context, query string, args []any, fn func(int64, row)) error {
-	rows, err := w.conn.QueryContext(ctx, query, args...)
+func each(ctx context.Context, conn *sql.Conn, query string, args []any, fn func(int64, row)) error {
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}

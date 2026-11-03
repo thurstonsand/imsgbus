@@ -22,7 +22,7 @@ const textPart networkid.PartID = ""
 func convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, msg core.Message) (*bridgev2.ConvertedMessage, error) {
 	converted := &bridgev2.ConvertedMessage{ReplyTo: replyTo(msg.ReplyTo)}
 	for i, file := range msg.Attachments {
-		content, err := convertFile(ctx, portal, intent, file)
+		content, err := convertFile(ctx, portal, intent, msg.GUID, file)
 		if err != nil {
 			return nil, err
 		}
@@ -39,7 +39,7 @@ func convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev
 	if msg.Text != "" || len(converted.Parts) == 0 {
 		content := &event.MessageEventContent{MsgType: event.MsgText, Body: msg.Text}
 		if msg.Text == "" {
-			zerolog.Ctx(ctx).Warn().Str("event", "unsupported").Str("guid", msg.GUID).Str("app", msg.App).
+			zerolog.Ctx(ctx).Warn().Str("event", "unsupported").Str("chat_guid", msg.ChatGUID).Str("guid", msg.GUID).Str("app", msg.App).
 				Msg("Bridging a message with neither text nor files as unsupported")
 			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Unsupported message; open it on an Apple device"}
 		}
@@ -48,9 +48,9 @@ func convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev
 	return converted, nil
 }
 
-func convertFile(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, file core.Attachment) (*event.MessageEventContent, error) {
+func convertFile(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, guid string, file core.Attachment) (*event.MessageEventContent, error) {
 	if file.Path == "" {
-		zerolog.Ctx(ctx).Info().Str("event", "attachment_missing").Str("mime", file.MIME).Msg("Attachment isn't on the Mac")
+		zerolog.Ctx(ctx).Info().Str("event", "attachment_missing").Str("chat_guid", string(portal.ID)).Str("guid", guid).Str("mime", file.MIME).Msg("Attachment isn't on the Mac")
 		return &event.MessageEventContent{MsgType: event.MsgNotice, Body: file.Name + " isn't downloaded on the Mac yet; open it on an Apple device"}, nil
 	}
 	data, err := os.ReadFile(file.Path)

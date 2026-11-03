@@ -114,3 +114,55 @@ func TestWatchReportsDeliveriesAndReadsOnce(t *testing.T) {
 	case <-time.After(time.Second):
 	}
 }
+
+func TestWatchChatsReportsDeletedAndRecoveredChats(t *testing.T) {
+	path, db := fixture(t)
+	insert(t, db, 1, false, time.Now(), 0, 0)
+	exec(t, db, `INSERT INTO chat VALUES (2, 'any;-;+15550002222')`) // already deleted
+
+	states := make(chan chatdb.ChatState, 16)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- chatdb.WatchChats(ctx, path, func(s chatdb.ChatState) { states <- s }) }()
+	next := func(want string) {
+		t.Helper()
+		select {
+		case s := <-states:
+			got := map[bool]string{true: "deleted ", false: "back "}[s.Deleted] + s.GUID
+			if got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		case err := <-done:
+			t.Fatalf("WatchChats ended: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("nothing reported, want %q", want)
+		}
+	}
+	next("deleted any;-;+15550002222")
+
+	exec(t, db, `DELETE FROM chat_message_join WHERE chat_id = 1`) // to Recently Deleted
+	next("deleted any;-;+15550001111")
+	exec(t, db, `INSERT INTO chat_message_join VALUES (1, 1)`) // recovered
+	next("back any;-;+15550001111")
+
+	insert(t, db, 2, false, time.Now(), 0, 0) // a new message in a live chat
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{`DELETE FROM chat_message_join WHERE chat_id = 1`, `DELETE FROM chat WHERE ROWID = 1`} {
+		if _, err := tx.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil { // erased outright, skipping Recently Deleted
+		t.Fatal(err)
+	}
+	next("deleted any;-;+15550001111")
+	select {
+	case s := <-states:
+		t.Fatalf("unexpected %+v", s)
+	case <-time.After(time.Second):
+	}
+}

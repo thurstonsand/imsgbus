@@ -216,6 +216,11 @@ func (c *Client) Read(ctx context.Context, chatGUID string) error {
 	return c.Call(ctx, "read", map[string]any{"chat_guid": chatGUID}, nil)
 }
 
+// ChatsDelete deletes a chat and its messages from Messages.
+func (c *Client) ChatsDelete(ctx context.Context, chatGUID string) error {
+	return c.Call(ctx, "chats.delete", map[string]any{"chat_guid": chatGUID}, nil)
+}
+
 // SendAttachment sends a file to a chat, as a voice message when audio is set, and returns the
 // new message's GUID.
 func (c *Client) SendAttachment(ctx context.Context, chatGUID, path, replyTo string, audio bool) (string, error) {

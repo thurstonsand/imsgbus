@@ -114,6 +114,11 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) (e
 				entry = entry.Int("code", rpcErr.Code)
 			}
 		}
+		if p, ok := params.(map[string]any); ok {
+			if chat, ok := p["chat_guid"].(string); ok {
+				entry = entry.Str("chat_guid", chat)
+			}
+		}
 		entry.Str("event", "imsg_call").Str("method", method).Bool("ok", err == nil).
 			Int64("duration_ms", time.Since(start).Milliseconds()).Msg("imsg call")
 	}()
