@@ -1,5 +1,6 @@
 // Package chatdb reads Messages' chat.db, read-only, for what imsg doesn't report: when a message
-// was delivered and when it was read, on either side, and when a chat was deleted or came back.
+// was delivered and when it was read, on either side, when a chat was deleted or came back, and
+// what change to a group a row records.
 package chatdb
 
 import (

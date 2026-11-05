@@ -62,7 +62,8 @@ func (s *Service) index(ctx context.Context) error {
 		var err error
 		switch evt := evt.(type) {
 		case Message:
-			if evt.Text != "" {
+			// Catching up never sees group changes, so the watch leaves them out too.
+			if evt.Text != "" && !evt.Announcement {
 				err = s.search.Index(ctx, []search.Document{document(evt.RowID, evt.GUID, evt.ChatGUID, evt.Sender, evt.IsFromMe, evt.Time, evt.Text)})
 			}
 		case Edit:

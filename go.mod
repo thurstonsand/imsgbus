@@ -11,6 +11,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	go.mau.fi/util v0.11.0
 	golang.org/x/text v0.43.0
+	howett.net/plist v1.0.1
 	maunium.net/go/mautrix v0.32.0
 )
 

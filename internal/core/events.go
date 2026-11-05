@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thurstonsand/imsgbus/internal/chatdb"
 	"github.com/thurstonsand/imsgbus/internal/imsg"
 )
 
@@ -26,6 +27,9 @@ type Message struct {
 	// App is the iMessage app that made the message, such as
 	// "com.apple.messages.URLBalloonProvider" for a link, or empty for a plain message.
 	App string
+	// Announcement is a change to a group, such as someone being added, that Text describes. It
+	// reads after the sender's name ("added Dana"), or stands alone when there is no sender.
+	Announcement bool
 }
 
 // Attachment is a file on a message. Path is empty when the file isn't on this Mac, such as one
@@ -148,6 +152,41 @@ func toMessage(m imsg.Message) Message {
 		Attachments: files,
 		App:         m.BalloonBundleID,
 	}
+}
+
+// announcementText describes a, after the name of whoever made it, or on its own when no one did.
+func announcementText(a chatdb.Announcement, name func(string) string) string {
+	subject := "someone"
+	if address, _ := Address(a.Subject); address != "" {
+		subject = name(address)
+	}
+	switch {
+	case a.Kind == chatdb.Added && a.Unattributed:
+		return subject + " was added to the conversation"
+	case a.Kind == chatdb.Added:
+		return "added " + subject + " to the conversation"
+	case a.Kind == chatdb.Removed && a.Unattributed:
+		return subject + " was removed from the conversation"
+	case a.Kind == chatdb.Removed:
+		return "removed " + subject + " from the conversation"
+	case a.Kind == chatdb.Renamed && a.Unattributed:
+		return "The conversation was named “" + a.Title + "”"
+	case a.Kind == chatdb.Renamed:
+		return "named the conversation “" + a.Title + "”"
+	case a.Kind == chatdb.NameRemoved && a.Unattributed:
+		return "The conversation's name was removed"
+	case a.Kind == chatdb.NameRemoved:
+		return "removed the conversation's name"
+	case a.Kind == chatdb.Left:
+		return "left the conversation"
+	case a.Kind == chatdb.PhotoChanged && a.Unattributed:
+		return "The group photo was changed"
+	case a.Kind == chatdb.PhotoChanged:
+		return "changed the group photo"
+	case a.Kind == chatdb.PhotoRemoved && a.Unattributed:
+		return "The group photo was removed"
+	}
+	return "removed the group photo"
 }
 
 func toEvent(m imsg.Message) Event {

@@ -29,7 +29,7 @@ mise run clean          # Remove build artifacts
 
 - `main.go`: the mxmain host process; it starts the search indexer and the MCP server once the bridge runs.
 - `internal/imsg`: the JSON-RPC client for one `imsg rpc` child, and typed wrappers for the methods imsgbus calls.
-- `internal/chatdb`: a read-only watch of Messages' chat.db for deliveries and reads, which imsg doesn't report.
+- `internal/chatdb`: read-only reads of Messages' chat.db for what imsg doesn't report: deliveries and reads, deleted chats, and group changes.
 - `internal/contacts`: the contacts catalog, read from the AddressBook stores: names for handles, and handles for names.
 - `internal/search`: the pluggable search `Backend` and its FTS5 implementation.
 - `internal/core`: frontend-neutral service over imsg.

@@ -38,7 +38,13 @@ func convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev
 	}
 	if msg.Text != "" || len(converted.Parts) == 0 {
 		content := &event.MessageEventContent{MsgType: event.MsgText, Body: msg.Text}
-		if msg.Text == "" {
+		switch {
+		// An emote reads after its sender's name, as Messages shows a group change.
+		case msg.Announcement && (msg.IsFromMe || msg.Sender != ""):
+			content.MsgType = event.MsgEmote
+		case msg.Announcement:
+			content.MsgType = event.MsgNotice
+		case msg.Text == "":
 			zerolog.Ctx(ctx).Warn().Str("event", "unsupported").Str("chat_guid", msg.ChatGUID).Str("guid", msg.GUID).Str("app", msg.App).
 				Msg("Bridging a message with neither text nor files as unsupported")
 			content = &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Unsupported message; open it on an Apple device"}

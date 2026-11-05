@@ -152,9 +152,50 @@ func (s *Service) Watch(ctx context.Context, sinceRowID int64, withFiles bool, h
 		if change, changed := s.remember(m.Message, seen); changed {
 			handle(change)
 		}
-		handle(toEvent(m.Message))
+		evt := toEvent(m.Message)
+		if msg, ok := evt.(Message); ok {
+			announced := []Message{msg}
+			s.announce(ctx, announced)
+			evt = announced[0]
+		}
+		handle(evt)
 		return nil
 	})
+}
+
+// announce describes each message that records a change to a group, which imsg reports with
+// neither text nor files, from chat.db.
+func (s *Service) announce(ctx context.Context, messages []Message) {
+	var guids []string
+	for _, m := range messages {
+		if m.Text == "" && len(m.Attachments) == 0 && m.App == "" {
+			guids = append(guids, m.GUID)
+		}
+	}
+	if len(guids) == 0 {
+		return
+	}
+	found, err := chatdb.Announcements(ctx, s.chatDB, guids)
+	if err != nil {
+		// Failing the watch would retry the same row forever and stop every chat; these messages
+		// just stay as they were before imsgbus read group changes.
+		s.log.Err(err).Strs("guids", guids).Msg("Failed to read group changes; leaving them unsupported")
+		return
+	}
+	for i, m := range messages {
+		a, ok := found[m.GUID]
+		if !ok {
+			continue
+		}
+		m.Announcement = true
+		m.Text = announcementText(a, s.Name)
+		// imsg names your own number, as someone else, for a change chat.db records without a sender.
+		m.Sender, m.IsFromMe = a.Actor, m.IsFromMe || a.Actor == ""
+		if a.Unattributed {
+			m.Sender, m.IsFromMe = "", false
+		}
+		messages[i] = m
+	}
 }
 
 // pump passes subscription id's notifications to deliver, in order, until ctx ends, imsg dies, or
@@ -426,6 +467,7 @@ func (s *Service) History(ctx context.Context, chatGUID string, after, before ti
 	for _, f := range slices.Backward(found) {
 		messages = append(messages, toMessage(f))
 	}
+	s.announce(ctx, messages)
 	return messages, nil
 }
 

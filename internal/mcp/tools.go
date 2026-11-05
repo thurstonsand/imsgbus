@@ -59,7 +59,7 @@ func (t *tools) register(s *sdk.Server) {
 // Message is one message as agents see it.
 type Message struct {
 	ID          string    `json:"id"`
-	From        string    `json:"from" jsonschema:"the sender, or me"`
+	From        string    `json:"from,omitempty" jsonschema:"the sender, or me; absent for a group change Messages attributes to no one"`
 	At          time.Time `json:"at"`
 	Text        string    `json:"text,omitempty"`
 	ReplyTo     string    `json:"reply_to,omitempty" jsonschema:"the id of the message this replies to"`
