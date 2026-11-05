@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-05
+
 ### Fixed
 
 - Reading a chat in Beeper whose newest event is a tapback marks it read in Messages. Beeper puts the read receipt on the tapback, which imsgbus used to ignore, so the chat stayed unread until the next message.
