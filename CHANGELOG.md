@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-05
+
 ### Fixed
 
 - A change to a group, such as someone being added, removed or leaving, or a new name or photo, comes into Beeper as a line from whoever made it ("Dana added Sam to the conversation") instead of "Unsupported message". imsg doesn't report what these rows are, so imsgbus reads them from chat.db. Messages already in Beeper keep the old placeholder.
