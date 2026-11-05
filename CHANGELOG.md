@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-05
+
 ### Fixed
 
 - A message sent from Beeper no longer comes back as a second copy when Messages saves it under a GUID other than the one imsgbus sent it with (openclaw/imsg#385). imsgbus matches Messages' copy to the send by chat and text, and points the message Beeper shows at Messages' GUID, so receipts and tapbacks on it still arrive.
