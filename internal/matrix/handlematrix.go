@@ -26,7 +26,9 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	switch msg.Content.MsgType {
 	case event.MsgText, event.MsgNotice, event.MsgEmote:
 		guid = core.NewMessageGUID()
+		c.sends.add(chatGUID, guid, msg.Content.Body, time.Now())
 		if err := c.core.SendText(ctx, chatGUID, guid, msg.Content.Body, replyGUID); err != nil {
+			c.sends.remove(guid)
 			return nil, err
 		}
 	case event.MsgImage, event.MsgVideo, event.MsgAudio, event.MsgFile:
@@ -74,8 +76,10 @@ func (c *Client) sendFile(ctx context.Context, msg *bridgev2.MatrixMessage, repl
 	if caption := content.Body; content.FileName != "" && caption != content.FileName {
 		captionGUID := core.NewMessageGUID()
 		msg.AddPendingToIgnore(networkid.TransactionID(captionGUID))
+		c.sends.add(string(msg.Portal.ID), captionGUID, caption, time.Now())
 		if err = c.core.SendText(ctx, string(msg.Portal.ID), captionGUID, caption, ""); err != nil {
 			msg.RemovePending(networkid.TransactionID(captionGUID))
+			c.sends.remove(captionGUID)
 			zerolog.Ctx(ctx).Err(err).Msg("Sent the file but not its caption")
 		}
 	}

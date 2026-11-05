@@ -33,6 +33,7 @@ type Client struct {
 	// deleting holds the chats Beeper is deleting, whose deletion in Messages the chat watch
 	// would otherwise bring back to delete again.
 	deleting map[string]bool
+	sends    sends
 }
 
 var (
@@ -56,7 +57,7 @@ func (c *Client) Connect(ctx context.Context) {
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	go c.syncChats(ctx)
 	go c.keep(ctx, "message watch", func() error {
-		err := c.core.Watch(ctx, c.cursor.position(), true, c.handle)
+		err := c.core.Watch(ctx, c.cursor.position(), true, func(evt core.Event) { c.handle(ctx, evt) })
 		if _, ok := errors.AsType[*core.OverflowError](err); ok {
 			// The cursor is still before every row the watch didn't finish, so resume from it.
 			return nil
@@ -164,10 +165,16 @@ func (c *Client) handleChatState(ctx context.Context, s core.ChatState) {
 	})
 }
 
-func (c *Client) handle(evt core.Event) {
+func (c *Client) handle(ctx context.Context, evt core.Event) {
 	c.logInbound(evt)
 	switch evt := evt.(type) {
 	case core.Message:
+		if evt.IsFromMe {
+			if sent := c.sends.echoOf(evt.ChatGUID, evt.GUID, evt.Text, evt.Time); sent != "" {
+				c.adoptGUID(ctx, evt.ChatGUID, sent, evt.GUID)
+				return
+			}
+		}
 		c.cursor.start(evt.RowID)
 		c.login.QueueRemoteEvent(&simplevent.Message[core.Message]{
 			Type:         bridgev2.RemoteEventMessage,
@@ -229,6 +236,28 @@ func (c *Client) handle(evt core.Event) {
 }
 
 // logInbound records each event the watch hands to Beeper, with how long after it happened.
+// adoptGUID points the message Beeper sent as sent at guid, which Messages recorded as guid,
+// so receipts, tapbacks and edits on it find the event Beeper already shows.
+func (c *Client) adoptGUID(ctx context.Context, chatGUID, sent, guid string) {
+	log := zerolog.Ctx(ctx).With().Str("chat_guid", chatGUID).Str("sent_guid", sent).Str("guid", guid).Logger()
+	msg, err := c.login.Bridge.DB.Message.GetPartByID(ctx, c.portalKey(chatGUID).Receiver, networkid.MessageID(sent), "")
+	if err != nil {
+		log.Err(err).Msg("Dropped Messages' copy of a send from Beeper, but failed to look up the message")
+		return
+	}
+	if msg == nil {
+		// A file's caption is never saved as a message of its own.
+		log.Info().Msg("Dropped Messages' copy of a send from Beeper recorded under another GUID")
+		return
+	}
+	msg.ID = networkid.MessageID(guid)
+	if err = c.login.Bridge.DB.Message.Update(ctx, msg); err != nil {
+		log.Err(err).Msg("Dropped Messages' copy of a send from Beeper, but failed to point the message at it")
+		return
+	}
+	log.Info().Msg("Matched Messages' copy of a send from Beeper recorded under another GUID")
+}
+
 func (c *Client) logInbound(evt core.Event) {
 	log := c.login.Log.Info().Str("event", "inbound")
 	var at time.Time
