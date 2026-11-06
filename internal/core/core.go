@@ -481,6 +481,22 @@ func (s *Service) Conversation(ctx context.Context, id string) (Conversation, er
 	return conversation, nil
 }
 
+// Target is the chat of a conversation that sends go to: the one Messages' filter left alone, as
+// a reply from the conversation list goes, or else the one with the newest message.
+func (s *Service) Target(ctx context.Context, id string) (string, error) {
+	conversation, err := s.Conversation(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if len(conversation.Chats) == 0 {
+		return "", fmt.Errorf("conversation %s has no chat left in Messages", conversation.ID)
+	}
+	if slices.Contains(conversation.Chats, conversation.ID) {
+		return conversation.ID, nil
+	}
+	return conversation.Chats[0], nil
+}
+
 // members returns the chats of the conversation a chat is part of, the one with the newest
 // message first.
 func (s *Service) members(ctx context.Context, id string) ([]chatdb.Member, error) {
@@ -597,9 +613,18 @@ func (s *Service) StartChat(ctx context.Context, address, text string) (chatGUID
 	return s.client.ChatsCreate(ctx, []string{address}, text)
 }
 
-// MarkRead marks every message in a chat read.
+// MarkRead marks every message in the conversation a chat is part of read.
 func (s *Service) MarkRead(ctx context.Context, chatGUID string) error {
-	return s.client.Read(ctx, chatGUID)
+	conversation, err := s.Conversation(ctx, chatGUID)
+	if err != nil {
+		return err
+	}
+	for _, guid := range conversation.Chats {
+		if err := s.client.Read(ctx, guid); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // readCheckDepth is how far back MarkReadThrough looks for the receipted message.

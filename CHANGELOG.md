@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The MCP tools see a person's filtered chats as one conversation, as Beeper does. `list_chats` lists each conversation once, with its unread messages from all of its chats, and says when Messages' filter has it under promotions, transactions or unknown senders. `mark_read` marks every chat of the conversation read, `search_messages` with a `chat` searches all of them, and `send_message` sends to the chat the filter left alone.
+
+### Fixed
+
+- Searching for messages from someone whose chat Messages' filter sorted finds them. The index stored those senders with the filter's category read as phone-number letters, as in `+1404348470976738`, so no address or name matched; the index needs rebuilding to fix the messages already in it.
+
 ## [0.2.7] - 2026-11-06
 
 ### Changed

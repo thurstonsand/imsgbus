@@ -97,15 +97,19 @@ func TestChatAndDateFilters(t *testing.T) {
 		doc(2, "chat-b", 20, "dinner tomorrow"),
 		doc(3, "chat-a", 30, "dinner again"),
 		doc(4, "chat-a", 40, "dinner was great"),
+		doc(5, "chat-c", 50, "dinner is on me"),
 	)
-	if got := rows(t, b, search.Query{Text: "dinner", ChatGUID: "chat-a"}); !slices.Equal(got, []int64{4, 3, 1}) {
+	if got := rows(t, b, search.Query{Text: "dinner", ChatGUIDs: []string{"chat-a"}}); !slices.Equal(got, []int64{4, 3, 1}) {
 		t.Errorf("chat-a = %v; want 4, 3, 1", got)
+	}
+	if got := rows(t, b, search.Query{Text: "dinner", ChatGUIDs: []string{"chat-a", "chat-c"}}); !slices.Equal(got, []int64{5, 4, 3, 1}) {
+		t.Errorf("chat-a and chat-c = %v; want 5, 4, 3, 1", got)
 	}
 	q := search.Query{Text: "dinner", Since: start.Add(20 * time.Minute), Before: start.Add(40 * time.Minute)}
 	if got := rows(t, b, q); !slices.Equal(got, []int64{3, 2}) {
 		t.Errorf("since 20m before 40m = %v; want 3, 2: since is inclusive, before exclusive", got)
 	}
-	q.ChatGUID = "chat-b"
+	q.ChatGUIDs = []string{"chat-b"}
 	if got := rows(t, b, q); !slices.Equal(got, []int64{2}) {
 		t.Errorf("chat-b since 20m before 40m = %v; want 2", got)
 	}

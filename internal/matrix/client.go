@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -443,22 +442,6 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 		return nil, err
 	}
 	return c.chatInfo(info), nil
-}
-
-// target is the chat of a conversation that sends go to: the one Messages' filter left alone, as
-// a reply from the conversation list goes, or else the one with the newest message.
-func (c *Client) target(ctx context.Context, conversationID string) (string, error) {
-	conversation, err := c.core.Conversation(ctx, conversationID)
-	if err != nil {
-		return "", err
-	}
-	if len(conversation.Chats) == 0 {
-		return "", fmt.Errorf("conversation %s has no chat left in Messages", conversationID)
-	}
-	if slices.Contains(conversation.Chats, conversation.ID) {
-		return conversation.ID, nil
-	}
-	return conversation.Chats[0], nil
 }
 
 func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {

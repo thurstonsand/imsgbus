@@ -390,6 +390,18 @@ func TestConversationJoinsAPersonsFilteredChats(t *testing.T) {
 		t.Errorf("newest 2 of the conversation, oldest first: %s; want %s", got, want)
 	}
 
+	// Sends go to the chat the filter left alone, even though the filtered one was named.
+	target, err := service.Target(ctx, "any;-;+15550000000(smsft)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "any;-;+15550000000" {
+		t.Errorf("target %s; want any;-;+15550000000", target)
+	}
+
+	if err = service.MarkRead(ctx, "any;-;+15550000000(smsft)"); err != nil {
+		t.Fatal(err)
+	}
 	if err = service.DeleteChat(ctx, "any;-;+15550000000"); err != nil {
 		t.Fatal(err)
 	}
@@ -397,8 +409,8 @@ func TestConversationJoinsAPersonsFilteredChats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "chats.delete any;-;+15550000000\nchats.delete any;-;+15550000000(smsft)\n"; string(got) != want {
-		t.Errorf("deleted\n%swant\n%s", got, want)
+	if want := "read any;-;+15550000000\nread any;-;+15550000000(smsft)\nchats.delete any;-;+15550000000\nchats.delete any;-;+15550000000(smsft)\n"; string(got) != want {
+		t.Errorf("marked read, then deleted\n%swant\n%s", got, want)
 	}
 }
 

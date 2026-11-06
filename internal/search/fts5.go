@@ -140,6 +140,10 @@ func (f *FTS5) Search(ctx context.Context, q Query) (Results, error) {
 			return Results{}, fmt.Errorf("malformed search cursor %q", q.Cursor)
 		}
 	}
+	chats, err := json.Marshal(append([]string{}, q.ChatGUIDs...))
+	if err != nil {
+		return Results{}, err
+	}
 	from, err := json.Marshal(append([]string{}, q.From...))
 	if err != nil {
 		return Results{}, err
@@ -149,14 +153,14 @@ func (f *FTS5) Search(ctx context.Context, q Query) (Results, error) {
 			snippet(messages_fts, 0, '', '', '…', 64)
 		FROM messages_fts JOIN messages m ON m.row_id = messages_fts.rowid
 		WHERE messages_fts MATCH @match
-			AND (@chat = '' OR m.chat_guid = @chat)
+			AND (@chats = '[]' OR m.chat_guid IN (SELECT value FROM json_each(@chats)))
 			AND (@from = '[]' OR m.sender IN (SELECT value FROM json_each(@from)))
 			AND (NOT @from_me OR m.is_from_me)
 			AND m.time >= @since AND m.time < @before
 			AND (m.time, m.row_id) < (@after_time, @after_row)
 		ORDER BY m.time DESC, m.row_id DESC
 		LIMIT @limit`,
-		sql.Named("match", match), sql.Named("chat", q.ChatGUID), sql.Named("from", string(from)), sql.Named("from_me", q.FromMe),
+		sql.Named("match", match), sql.Named("chats", string(chats)), sql.Named("from", string(from)), sql.Named("from_me", q.FromMe),
 		sql.Named("since", since), sql.Named("before", before),
 		sql.Named("after_time", afterTime), sql.Named("after_row", afterRow),
 		// One extra row tells whether another page follows.

@@ -17,7 +17,7 @@ import (
 )
 
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	chatGUID, err := c.target(ctx, string(msg.Portal.ID))
+	chatGUID, err := c.core.Target(ctx, string(msg.Portal.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (c *Client) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.
 }
 
 func (c *Client) HandleMatrixTyping(ctx context.Context, typing *bridgev2.MatrixTyping) error {
-	chatGUID, err := c.target(ctx, string(typing.Portal.ID))
+	chatGUID, err := c.core.Target(ctx, string(typing.Portal.ID))
 	if err != nil {
 		return err
 	}

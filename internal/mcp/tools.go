@@ -45,7 +45,7 @@ func (t *tools) register(s *sdk.Server) {
 	readOnly := &sdk.ToolAnnotations{ReadOnlyHint: true}
 	sends := &sdk.ToolAnnotations{DestructiveHint: new(false)}
 	changes := &sdk.ToolAnnotations{DestructiveHint: new(true)}
-	sdk.AddTool(s, &sdk.Tool{Name: "list_chats", Annotations: readOnly, Description: "Lists chats, most recently active first. With unread_only, lists only chats with unread messages, and includes those messages."}, t.listChats)
+	sdk.AddTool(s, &sdk.Tool{Name: "list_chats", Annotations: readOnly, Description: "Lists conversations, most recently active first. With unread_only, lists only conversations with unread messages, and includes those messages."}, t.listChats)
 	sdk.AddTool(s, &sdk.Tool{Name: "get_messages", Annotations: readOnly, Description: "Reads a chat's messages, oldest to newest, ending at the newest or before a time. Pass more_before back as before for the page before."}, t.getMessages)
 	sdk.AddTool(s, &sdk.Tool{Name: "search_messages", Annotations: readOnly, Description: `Searches every chat's messages, newest first. Every word must appear; "quote" a phrase to match it as written. Words match inside longer words and ignore accents and case, but need 3 or more letters. Pass next_cursor back as cursor for the next page.`}, t.searchMessages)
 	sdk.AddTool(s, &sdk.Tool{Name: "get_attachment", Annotations: readOnly, Description: "Shows an image attached to a message."}, t.getAttachment)
@@ -53,7 +53,7 @@ func (t *tools) register(s *sdk.Server) {
 	sdk.AddTool(s, &sdk.Tool{Name: "tapback", Annotations: sends, Description: "Adds or removes this account's tapback on a message. A new tapback replaces the one already there."}, t.tapback)
 	sdk.AddTool(s, &sdk.Tool{Name: "edit_message", Annotations: changes, Description: "Changes the text of a message this account sent in the last 15 minutes."}, t.editMessage)
 	sdk.AddTool(s, &sdk.Tool{Name: "unsend_message", Annotations: changes, Description: "Retracts a message this account sent in the last 2 minutes, for everyone."}, t.unsendMessage)
-	sdk.AddTool(s, &sdk.Tool{Name: "mark_read", Annotations: changes, Description: "Marks a chat read, which tells the other side when they get read receipts."}, t.markRead)
+	sdk.AddTool(s, &sdk.Tool{Name: "mark_read", Annotations: changes, Description: "Marks a conversation read, which tells the other side when they get read receipts."}, t.markRead)
 }
 
 // Message is one message as agents see it.
@@ -78,10 +78,12 @@ func (t *tools) message(m core.Message) Message {
 	return Message{ID: m.GUID, From: from, At: m.Time, Text: m.Text, ReplyTo: m.ReplyTo, Attachments: files}
 }
 
-// Chat is one chat as agents see it.
+// Chat is one conversation as agents see it. Messages files a person's messages under several
+// chats when its filter sorts some of them (see core.ConversationID); agents see them as one.
 type Chat struct {
 	Chat        string    `json:"chat" jsonschema:"the chat's name, to pass to other tools"`
 	IsGroup     bool      `json:"is_group,omitempty"`
+	Filtered    string    `json:"filtered,omitempty" jsonschema:"why Messages' filter keeps this chat out of the conversation list: promotions, transactions, or unknown sender"`
 	LastMessage time.Time `json:"last_message_at"`
 	Unread      int       `json:"unread,omitempty"`
 	Messages    []Message `json:"unread_messages,omitempty" jsonschema:"the newest unread messages, oldest first"`
@@ -109,9 +111,21 @@ func (t *tools) listChats(ctx context.Context, _ *sdk.CallToolRequest, in listCh
 	if err != nil {
 		return nil, listChatsOut{}, err
 	}
-	out := listChatsOut{More: len(chats) > limit}
-	for _, c := range chats[:min(limit, len(chats))] {
-		chat := Chat{Chat: t.chatLabel(c), IsGroup: c.IsGroup, LastMessage: c.LastMessage, Unread: c.Unread}
+	// chats is newest first, so a conversation's first chat is the one its newest message is in.
+	var conversations []core.Chat
+	at := map[string]int{}
+	for _, c := range chats {
+		id := core.ConversationID(c.GUID)
+		if i, ok := at[id]; ok {
+			conversations[i].Unread += c.Unread
+			continue
+		}
+		at[id] = len(conversations)
+		conversations = append(conversations, c)
+	}
+	out := listChatsOut{More: len(conversations) > limit}
+	for _, c := range conversations[:min(limit, len(conversations))] {
+		chat := Chat{Chat: t.chatLabel(c), IsGroup: c.IsGroup, Filtered: filtered(c.GUID), LastMessage: c.LastMessage, Unread: c.Unread}
 		if in.UnreadOnly {
 			messages, err := t.core.History(ctx, c.GUID, time.Time{}, time.Time{}, min(c.Unread, maxUnreadShown))
 			if err != nil {
@@ -186,7 +200,11 @@ func (t *tools) searchMessages(ctx context.Context, _ *sdk.CallToolRequest, in s
 		if err != nil {
 			return nil, searchOut{}, err
 		}
-		q.ChatGUID = chat.GUID
+		conversation, err := t.core.Conversation(ctx, chat.GUID)
+		if err != nil {
+			return nil, searchOut{}, err
+		}
+		q.ChatGUIDs = conversation.Chats
 	}
 	switch {
 	case strings.EqualFold(in.From, "me"):
@@ -301,14 +319,18 @@ func (t *tools) sendMessage(ctx context.Context, _ *sdk.CallToolRequest, in send
 		if in.ReplyTo != "" {
 			return nil, sendOut{}, errors.New("there is no chat to reply in yet")
 		}
-		_, guid, err := t.core.StartChat(ctx, to.address, in.Text)
-		if err != nil {
-			return nil, sendOut{}, err
+		_, guid, startErr := t.core.StartChat(ctx, to.address, in.Text)
+		if startErr != nil {
+			return nil, sendOut{}, startErr
 		}
 		return nil, sendOut{SentTo: t.person(to.address), Address: to.address, MessageID: guid}, nil
 	}
+	chatGUID, err := t.core.Target(ctx, to.chat.GUID)
+	if err != nil {
+		return nil, sendOut{}, err
+	}
 	guid := core.NewMessageGUID()
-	if err := t.core.SendText(ctx, to.chat.GUID, guid, in.Text, in.ReplyTo); err != nil {
+	if err := t.core.SendText(ctx, chatGUID, guid, in.Text, in.ReplyTo); err != nil {
 		return nil, sendOut{}, err
 	}
 	return nil, sendOut{SentTo: t.chatLabel(to.chat), MessageID: guid}, nil
@@ -379,6 +401,24 @@ func (t *tools) existing(ctx context.Context, name string) (core.Chat, error) {
 		return core.Chat{}, fmt.Errorf("no chat with %s yet", name)
 	}
 	return to.chat, nil
+}
+
+// filtered names the category Messages' filter sorted a chat into, or is empty for a chat it
+// left alone.
+func filtered(chatGUID string) string {
+	_, handle, _ := strings.Cut(chatGUID, ";-;")
+	_, category := core.Address(handle)
+	switch {
+	case category == "":
+		return ""
+	case category == "filtered":
+		return "unknown sender"
+	case strings.HasPrefix(category, "smsfp"):
+		return "promotions"
+	case strings.HasPrefix(category, "smsft"):
+		return "transactions"
+	}
+	return category
 }
 
 func bounded(n, fallback, most int) int {

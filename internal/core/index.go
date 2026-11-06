@@ -78,7 +78,8 @@ func (s *Service) index(ctx context.Context) error {
 }
 
 func document(rowID int64, guid, chatGUID, sender string, isFromMe bool, at time.Time, text string) search.Document {
-	return search.Document{RowID: rowID, GUID: guid, ChatGUID: chatGUID, Sender: contacts.Normalize(sender), IsFromMe: isFromMe, Time: at, Text: text}
+	address, _ := Address(sender)
+	return search.Document{RowID: rowID, GUID: guid, ChatGUID: chatGUID, Sender: contacts.Normalize(address), IsFromMe: isFromMe, Time: at, Text: text}
 }
 
 // heartbeatEvery is how often RunHeartbeat reports, so a quiet log still shows imsgbus alive.

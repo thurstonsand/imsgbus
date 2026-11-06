@@ -21,8 +21,9 @@ type Document struct {
 
 // Query asks for the messages matching Text. The other filters apply when set.
 type Query struct {
-	Text     string
-	ChatGUID string
+	Text string
+	// ChatGUIDs keeps messages in any of these chats.
+	ChatGUIDs []string
 	// From keeps messages sent from any of these handles; FromMe keeps the account's own.
 	From   []string
 	FromMe bool
