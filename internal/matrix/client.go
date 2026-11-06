@@ -215,6 +215,10 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 				c.adoptGUID(ctx, evt.ChatGUID, sent, evt.GUID)
 				return
 			}
+			if c.isRetry(ctx, evt.ChatGUID, evt.GUID) {
+				c.adoptGUID(ctx, evt.ChatGUID, strings.ToLower(evt.GUID), evt.GUID)
+				return
+			}
 		}
 		c.cursor.start(evt.RowID)
 		if !evt.IsGroup {
@@ -302,6 +306,22 @@ func (c *Client) reclassify(chatGUID string) {
 		PortalKey: c.portalKey(id),
 		ChatInfo:  &bridgev2.ChatInfo{UserLocal: &bridgev2.UserLocalPortalInfo{Tag: &tag}},
 	})
+}
+
+// isRetry says whether guid is Messages' retry of a send from Beeper. imsg records sends under
+// the lowercase GUID imsgbus picks, and Try Again in Messages sends the failed message again as a
+// new row under the same GUID in uppercase, minutes later or not at all.
+func (c *Client) isRetry(ctx context.Context, chatGUID, guid string) bool {
+	sent := strings.ToLower(guid)
+	if sent == guid {
+		return false
+	}
+	msg, err := c.login.Bridge.DB.Message.GetPartByID(ctx, c.portalKey(chatGUID).Receiver, networkid.MessageID(sent), "")
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Str("guid", guid).Msg("Failed to look up a send this may retry")
+		return false
+	}
+	return msg != nil
 }
 
 // logInbound records each event the watch hands to Beeper, with how long after it happened.
