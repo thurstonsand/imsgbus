@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-11-06
+
 ### Changed
 
 - A person has one room in Beeper, however many chats Messages' filter splits them across. Messages files a message from someone not in Contacts under a chat of its own for each category (Transactions, Promotions, Unknown Senders), so one number used to bring a room per category. Their messages now share one room, which is low priority while the newest one is filtered, and moves out of it when one arrives in the conversation list, as after Mark as Known. Sends go to the chat Messages left alone; reading, tapbacks, edits and deletes reach whichever chat holds the message. On connect, rooms split this way are deleted and come back as one with their combined history.
