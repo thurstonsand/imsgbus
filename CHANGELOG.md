@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-11-06
+
 ### Changed
 
 - Someone in Contacts has one room in Beeper, and one conversation in the MCP tools, however many of their addresses they've written from, as Messages shows them: two phone numbers, or a number and an email, used to bring a room each. Sends go to their newest chat Messages' filter left alone, or to the address an MCP caller names. Rooms follow Contacts, on connect and whenever Contacts changes: of the rooms that now share a conversation, the one with the most messages stays and takes in the others' history from before its oldest message and after its newest, and the rest are deleted; messages from them in between stay in Messages only.
