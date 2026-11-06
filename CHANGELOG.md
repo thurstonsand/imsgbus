@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A resync of every chat, as after rooms merge, no longer fails dozens of chats with imsg's "Server busy": requests beyond 64 at once wait their turn instead of passing imsg's limit of 128 outstanding.
+
 ## [0.2.9] - 2026-11-06
 
 ### Changed

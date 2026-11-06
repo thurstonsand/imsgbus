@@ -29,6 +29,10 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("imsg: %s (%d): %s", e.Message, e.Code, e.Data)
 }
 
+// maxInFlight keeps requests queued here rather than refused: imsg rpc answers "Server busy" to
+// anything beyond its 128 outstanding requests, and a resync of every chat sends far more.
+const maxInFlight = 64
+
 // ErrClosed is returned for calls made after the child exited.
 var ErrClosed = errors.New("imsg: rpc child exited")
 
@@ -48,6 +52,7 @@ type Client struct {
 	notify NotificationHandler
 
 	writeLock sync.Mutex
+	slots     chan struct{}
 	lock      sync.Mutex
 	nextID    int64
 	pending   map[int64]chan response
@@ -79,6 +84,7 @@ func Start(log zerolog.Logger, path string, notify NotificationHandler) (*Client
 		cmd:       cmd,
 		stdin:     stdin,
 		notify:    notify,
+		slots:     make(chan struct{}, maxInFlight),
 		pending:   make(map[int64]chan response),
 		stderrEOF: make(chan struct{}),
 		exited:    make(chan struct{}),
@@ -122,6 +128,14 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) (e
 		entry.Str("event", "imsg_call").Str("method", method).Bool("ok", err == nil).
 			Int64("duration_ms", time.Since(start).Milliseconds()).Msg("imsg call")
 	}()
+	select {
+	case c.slots <- struct{}{}:
+		defer func() { <-c.slots }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.exited:
+		return ErrClosed
+	}
 	c.lock.Lock()
 	if c.exitErr != nil {
 		c.lock.Unlock()
