@@ -17,7 +17,10 @@ import (
 )
 
 func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	chatGUID := string(msg.Portal.ID)
+	chatGUID, err := c.target(ctx, string(msg.Portal.ID))
+	if err != nil {
+		return nil, err
+	}
 	var replyGUID string
 	if msg.ReplyTo != nil {
 		replyGUID = string(msg.ReplyTo.ID)
@@ -27,13 +30,12 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	case event.MsgText, event.MsgNotice, event.MsgEmote:
 		guid = core.NewMessageGUID()
 		c.sends.add(chatGUID, guid, msg.Content.Body, time.Now())
-		if err := c.core.SendText(ctx, chatGUID, guid, msg.Content.Body, replyGUID); err != nil {
+		if err = c.core.SendText(ctx, chatGUID, guid, msg.Content.Body, replyGUID); err != nil {
 			c.sends.remove(guid)
 			return nil, err
 		}
 	case event.MsgImage, event.MsgVideo, event.MsgAudio, event.MsgFile:
-		var err error
-		if guid, err = c.sendFile(ctx, msg, replyGUID); err != nil {
+		if guid, err = c.sendFile(ctx, msg, chatGUID, replyGUID); err != nil {
 			return nil, err
 		}
 	default:
@@ -46,9 +48,9 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	}}, nil
 }
 
-// sendFile sends a Matrix file, then its caption as a message of its own, as Messages does, and
-// returns the file's message GUID.
-func (c *Client) sendFile(ctx context.Context, msg *bridgev2.MatrixMessage, replyGUID string) (string, error) {
+// sendFile sends a Matrix file to a chat, then its caption as a message of its own, as Messages
+// does, and returns the file's message GUID.
+func (c *Client) sendFile(ctx context.Context, msg *bridgev2.MatrixMessage, chatGUID, replyGUID string) (string, error) {
 	content := msg.Content
 	uri := content.URL
 	if content.File != nil {
@@ -69,15 +71,15 @@ func (c *Client) sendFile(ctx context.Context, msg *bridgev2.MatrixMessage, repl
 		return "", err
 	}
 	// imsg stages its own copy for Messages, so this one can go once the send returns.
-	guid, err := c.core.SendFile(ctx, string(msg.Portal.ID), path, replyGUID, content.MSC3245Voice != nil)
+	guid, err := c.core.SendFile(ctx, chatGUID, path, replyGUID, content.MSC3245Voice != nil)
 	if err != nil {
 		return "", err
 	}
 	if caption := content.Body; content.FileName != "" && caption != content.FileName {
 		captionGUID := core.NewMessageGUID()
 		msg.AddPendingToIgnore(networkid.TransactionID(captionGUID))
-		c.sends.add(string(msg.Portal.ID), captionGUID, caption, time.Now())
-		if err = c.core.SendText(ctx, string(msg.Portal.ID), captionGUID, caption, ""); err != nil {
+		c.sends.add(chatGUID, captionGUID, caption, time.Now())
+		if err = c.core.SendText(ctx, chatGUID, captionGUID, caption, ""); err != nil {
 			msg.RemovePending(networkid.TransactionID(captionGUID))
 			c.sends.remove(captionGUID)
 			zerolog.Ctx(ctx).Err(err).Msg("Sent the file but not its caption")
@@ -112,7 +114,11 @@ func (c *Client) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.
 }
 
 func (c *Client) HandleMatrixTyping(ctx context.Context, typing *bridgev2.MatrixTyping) error {
-	return c.core.SetTyping(ctx, string(typing.Portal.ID), typing.IsTyping)
+	chatGUID, err := c.target(ctx, string(typing.Portal.ID))
+	if err != nil {
+		return err
+	}
+	return c.core.SetTyping(ctx, chatGUID, typing.IsTyping)
 }
 
 // PreHandleMatrixReaction keeps one tapback per person per message, as iMessage does.
@@ -125,16 +131,33 @@ func (c *Client) PreHandleMatrixReaction(_ context.Context, msg *bridgev2.Matrix
 }
 
 func (c *Client) HandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
-	err := c.core.SetTapback(ctx, string(msg.Portal.ID), string(msg.TargetMessage.ID), msg.PreHandleResp.Emoji, false)
-	return &database.Reaction{}, err
+	chatGUID, err := c.chatOf(ctx, msg.TargetMessage.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &database.Reaction{}, c.core.SetTapback(ctx, chatGUID, string(msg.TargetMessage.ID), msg.PreHandleResp.Emoji, false)
 }
 
 func (c *Client) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
-	return c.core.SetTapback(ctx, string(msg.Portal.ID), string(msg.TargetReaction.MessageID), msg.TargetReaction.Emoji, true)
+	chatGUID, err := c.chatOf(ctx, msg.TargetReaction.MessageID)
+	if err != nil {
+		return err
+	}
+	return c.core.SetTapback(ctx, chatGUID, string(msg.TargetReaction.MessageID), msg.TargetReaction.Emoji, true)
 }
 
 func (c *Client) HandleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixEdit) error {
-	return c.core.Edit(ctx, string(msg.Portal.ID), string(msg.EditTarget.ID), msg.Content.Body)
+	chatGUID, err := c.chatOf(ctx, msg.EditTarget.ID)
+	if err != nil {
+		return err
+	}
+	return c.core.Edit(ctx, chatGUID, string(msg.EditTarget.ID), msg.Content.Body)
+}
+
+// chatOf is the chat a message is in, of the several a conversation can have.
+func (c *Client) chatOf(ctx context.Context, guid networkid.MessageID) (string, error) {
+	chatGUID, _, err := c.core.MessageChat(ctx, string(guid))
+	return chatGUID, err
 }
 
 // HandleMatrixMessageRemove unsends a message this account sent; iMessage can't delete anyone
@@ -143,11 +166,15 @@ func (c *Client) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.Ma
 	if msg.TargetMessage.SenderID != networkid.UserID(c.login.RemoteName) {
 		return bridgev2.ErrUnsupportedMessageType
 	}
-	return c.core.Unsend(ctx, string(msg.Portal.ID), string(msg.TargetMessage.ID))
+	chatGUID, err := c.chatOf(ctx, msg.TargetMessage.ID)
+	if err != nil {
+		return err
+	}
+	return c.core.Unsend(ctx, chatGUID, string(msg.TargetMessage.ID))
 }
 
-// HandleMatrixDeleteChat deletes the chat in Messages, for this account only: iMessage can't
-// delete a chat for anyone else.
+// HandleMatrixDeleteChat deletes every chat of the conversation in Messages, for this account
+// only: iMessage can't delete a chat for anyone else.
 func (c *Client) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev2.MatrixDeleteChat) error {
 	if msg.Content.DeleteForEveryone {
 		return bridgev2.ErrDeleteChatNotSupported

@@ -21,6 +21,9 @@ import (
 
 const fakeScenario = "IMSGBUS_FAKE_IMSG"
 
+// fakeCalls names a file the fake appends each read and chats.delete to, with the chat it got.
+const fakeCalls = "IMSGBUS_FAKE_CALLS"
+
 // TestMain lets the test binary stand in for `imsg rpc`: core runs `<path> rpc`, and the scenario
 // in the environment says what the fake writes when a watch subscribes.
 func TestMain(m *testing.M) {
@@ -45,6 +48,10 @@ func fakeIMsg(scenario string) {
 		var request struct {
 			ID     int64  `json:"id"`
 			Method string `json:"method"`
+			Params struct {
+				ChatID   int64  `json:"chat_id"`
+				ChatGUID string `json:"chat_guid"`
+			} `json:"params"`
 		}
 		if err := json.Unmarshal(in.Bytes(), &request); err != nil {
 			panic(err)
@@ -54,6 +61,16 @@ func fakeIMsg(scenario string) {
 			write(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"chats":[{"id":62,"guid":"any;-;+15550000000"}]}}`, request.ID))
 			continue
 		case "messages.history":
+			if scenario == "conversation" {
+				// A person's plain chat (62) and the chat Messages' filter filed one of their
+				// messages under (63), each newest first.
+				page := map[int64]string{
+					62: `{"id":40,"guid":"plain40","created_at":"2026-10-01T10:00:00Z"},{"id":20,"guid":"plain20","created_at":"2026-09-01T10:00:00Z"}`,
+					63: `{"id":30,"guid":"filtered30","created_at":"2026-09-15T10:00:00Z"}`,
+				}[request.Params.ChatID]
+				write(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"messages":[%s]}}`, request.ID, page))
+				continue
+			}
 			// Newest first by date, as imsg orders it: row 31 came in after row 30 went out but
 			// carries an earlier date, as Messages records a message to yourself.
 			write(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"messages":[`+
@@ -101,8 +118,56 @@ func fakeIMsg(scenario string) {
 			write(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"subscription":7}}`, request.ID))
 			continue
 		}
+		if calls := os.Getenv(fakeCalls); calls != "" && (request.Method == "read" || request.Method == "chats.delete") {
+			f, err := os.OpenFile(filepath.Clean(calls), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // the test's own temporary file
+			if err != nil {
+				panic(err)
+			}
+			_, _ = fmt.Fprintf(f, "%s %s\n", request.Method, request.Params.ChatGUID)
+			_ = f.Close()
+		}
 		write(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{}}`, request.ID))
 	}
+}
+
+// chatDB writes a chat.db holding the given chats, each with a message at the given time unless
+// that time is zero, and returns its path.
+func chatDB(t *testing.T, chats map[int64]struct {
+	guid string
+	last time.Time
+}) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "chat.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, stmt := range []string{
+		`CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT)`,
+		`CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER)`,
+		`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	epoch := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	for id, c := range chats {
+		if _, err := db.Exec(`INSERT INTO chat VALUES (?, ?)`, id, c.guid); err != nil {
+			t.Fatal(err)
+		}
+		if c.last.IsZero() {
+			continue
+		}
+		if _, err := db.Exec(`INSERT INTO message (date) VALUES (?)`, int64(c.last.Sub(epoch))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO chat_message_join VALUES (?, last_insert_rowid())`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
 }
 
 func startFake(t *testing.T, scenario string) *core.Service {
@@ -162,7 +227,10 @@ func TestWatchEndsOnImsgError(t *testing.T) {
 }
 
 func TestMarkReadThroughNeedsEveryInboundMessageSeen(t *testing.T) {
-	service := startFake(t, "receipts")
+	service := startFakeWith(t, "receipts", chatDB(t, map[int64]struct {
+		guid string
+		last time.Time
+	}{62: {"any;-;+15550000000", time.Now()}}))
 	for _, tc := range []struct {
 		seen string
 		want bool
@@ -283,5 +351,66 @@ func TestWatchDescribesGroupChanges(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestConversationJoinsAPersonsFilteredChats(t *testing.T) {
+	calls := filepath.Join(t.TempDir(), "calls")
+	t.Setenv(fakeCalls, calls)
+	service := startFakeWith(t, "conversation", chatDB(t, map[int64]struct {
+		guid string
+		last time.Time
+	}{
+		62: {"any;-;+15550000000", time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)},
+		63: {"any;-;+15550000000(smsft)", time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)},
+		// Deleted: no message left outside Recently Deleted.
+		64: {"any;-;+15550000000(smsfp)", time.Time{}},
+		// A number that only starts the same is someone else.
+		65: {"any;-;+155500000001", time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)},
+	}))
+	ctx := t.Context()
+
+	conversation, err := service.Conversation(ctx, "any;-;+15550000000(smsft)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("%s %v", conversation.ID, conversation.Chats), "any;-;+15550000000 [any;-;+15550000000 any;-;+15550000000(smsft)]"; got != want {
+		t.Errorf("conversation %s; want %s", got, want)
+	}
+
+	history, err := service.History(ctx, "any;-;+15550000000", time.Time{}, time.Time{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guids := make([]string, 0, len(history))
+	for _, m := range history {
+		guids = append(guids, m.GUID)
+	}
+	if got, want := strings.Join(guids, ","), "filtered30,plain40"; got != want {
+		t.Errorf("newest 2 of the conversation, oldest first: %s; want %s", got, want)
+	}
+
+	if err = service.DeleteChat(ctx, "any;-;+15550000000"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Clean(calls))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "chats.delete any;-;+15550000000\nchats.delete any;-;+15550000000(smsft)\n"; string(got) != want {
+		t.Errorf("deleted\n%swant\n%s", got, want)
+	}
+}
+
+func TestConversationIDDropsTheFilterCategory(t *testing.T) {
+	for guid, want := range map[string]string{
+		"any;-;+15550000000(smsft_rm)": "any;-;+15550000000",
+		"any;-;+15550000000":           "any;-;+15550000000",
+		"any;-;24215(smsft_or)":        "any;-;24215",
+		"any;+;chat123(x)":             "any;+;chat123(x)",
+	} {
+		if got := core.ConversationID(guid); got != want {
+			t.Errorf("ConversationID(%q) = %q; want %q", guid, got, want)
+		}
 	}
 }

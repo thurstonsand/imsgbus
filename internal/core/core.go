@@ -3,6 +3,7 @@
 package core
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -344,9 +345,19 @@ func (s *Service) WatchChats(ctx context.Context, handle func(ChatState)) error 
 	return chatdb.WatchChats(ctx, s.chatDB, handle)
 }
 
-// DeleteChat moves a chat and its messages to Recently Deleted in Messages.
+// DeleteChat moves every chat of the conversation a chat is part of, and their messages, to
+// Recently Deleted in Messages.
 func (s *Service) DeleteChat(ctx context.Context, chatGUID string) error {
-	return s.client.ChatsDelete(ctx, chatGUID)
+	conversation, err := s.Conversation(ctx, chatGUID)
+	if err != nil {
+		return err
+	}
+	for _, guid := range conversation.Chats {
+		if err := s.client.ChatsDelete(ctx, guid); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewMessageGUID returns a GUID for SendText, for callers that must know it before sending.
@@ -446,23 +457,72 @@ func (s *Service) learn(c imsg.Chat) {
 	}
 }
 
-// History returns up to limit of a chat's messages older than before, or newer than after,
-// oldest first. Tapbacks are left out.
-func (s *Service) History(ctx context.Context, chatGUID string, after, before time.Time, limit int) ([]Message, error) {
-	if _, err := s.Chat(ctx, chatGUID); err != nil {
+// Conversation is every chat with a conversation's other side that still has a message; see
+// ConversationID.
+type Conversation struct {
+	ID string
+	// Chats holds the GUIDs of its chats, the one with the newest message first.
+	Chats []string
+}
+
+// Conversation looks up the conversation a chat is part of, by the chat's GUID or the
+// conversation's ID. A conversation whose every chat is deleted has no chats.
+func (s *Service) Conversation(ctx context.Context, id string) (Conversation, error) {
+	members, err := s.members(ctx, id)
+	if err != nil {
+		return Conversation{}, err
+	}
+	conversation := Conversation{ID: ConversationID(id)}
+	for _, m := range members {
+		if m.Live {
+			conversation.Chats = append(conversation.Chats, m.GUID)
+		}
+	}
+	return conversation, nil
+}
+
+// members returns the chats of the conversation a chat is part of, the one with the newest
+// message first.
+func (s *Service) members(ctx context.Context, id string) ([]chatdb.Member, error) {
+	members, err := chatdb.Members(ctx, s.chatDB, ConversationID(id))
+	if err != nil {
 		return nil, err
 	}
+	if len(members) == 0 {
+		return nil, fmt.Errorf("no chat %s", id)
+	}
 	s.lock.Lock()
-	chatID := s.chatIDs[chatGUID]
-	s.lock.Unlock()
+	defer s.lock.Unlock()
+	for _, m := range members {
+		s.chatIDs[m.GUID] = m.RowID
+	}
+	return members, nil
+}
+
+// History returns up to limit of the messages of the conversation a chat is part of, older than
+// before, or newer than after, oldest first. Tapbacks are left out.
+func (s *Service) History(ctx context.Context, chatGUID string, after, before time.Time, limit int) ([]Message, error) {
+	members, err := s.members(ctx, chatGUID)
+	if err != nil {
+		return nil, err
+	}
 	if !after.IsZero() {
 		// imsg's start bound is inclusive.
 		after = after.Add(time.Nanosecond)
 	}
-	found, err := s.client.History(ctx, chatID, limit, after, before, true)
-	if err != nil {
-		return nil, err
+	var found []imsg.Message
+	for _, m := range members {
+		page, err := s.client.History(ctx, m.RowID, limit, after, before, true)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, page...)
 	}
+	// imsg pages each chat newest first; keep the newest limit of them all.
+	slices.SortFunc(found, func(a, b imsg.Message) int {
+		return cmp.Or(b.CreatedAt.Compare(a.CreatedAt), cmp.Compare(b.ID, a.ID))
+	})
+	found = found[:min(limit, len(found))]
 	messages := make([]Message, 0, len(found))
 	for _, f := range slices.Backward(found) {
 		messages = append(messages, toMessage(f))
@@ -545,33 +605,46 @@ func (s *Service) MarkRead(ctx context.Context, chatGUID string) error {
 // readCheckDepth is how far back MarkReadThrough looks for the receipted message.
 const readCheckDepth = 50
 
-// MarkReadThrough marks a chat read for a reader who has seen everything up to the message with
-// the given GUID. imsg can only mark a whole chat read, so it does nothing while a newer message
-// from someone else exists that the reader hasn't seen, and reports whether it marked the chat.
+// MarkReadThrough marks the conversation a chat is part of read for a reader who has seen
+// everything up to the message with the given GUID. imsg can only mark a whole chat read, so it
+// leaves alone each of the conversation's chats with a newer message from someone else that the
+// reader hasn't seen, and reports whether it marked any.
 func (s *Service) MarkReadThrough(ctx context.Context, chatGUID, guid string) (bool, error) {
-	if _, err := s.Chat(ctx, chatGUID); err != nil {
-		return false, err
-	}
-	s.lock.Lock()
-	chatID := s.chatIDs[chatGUID]
-	s.lock.Unlock()
-	messages, err := s.client.History(ctx, chatID, readCheckDepth, time.Time{}, time.Time{}, false)
+	members, err := s.members(ctx, chatGUID)
 	if err != nil {
 		return false, err
 	}
-	seen, newestInbound := int64(-1), int64(0)
-	for _, m := range messages {
-		if m.GUID == guid {
-			seen = m.ID
+	// Row IDs order messages across every chat on this Mac.
+	seen := int64(-1)
+	newestInbound := make([]int64, len(members))
+	for i, member := range members {
+		messages, err := s.client.History(ctx, member.RowID, readCheckDepth, time.Time{}, time.Time{}, false)
+		if err != nil {
+			return false, err
 		}
-		if !m.IsFromMe {
-			newestInbound = max(newestInbound, m.ID)
+		for _, m := range messages {
+			if m.GUID == guid {
+				seen = m.ID
+			}
+			if !m.IsFromMe {
+				newestInbound[i] = max(newestInbound[i], m.ID)
+			}
 		}
 	}
-	if seen < 0 || newestInbound > seen {
+	if seen < 0 {
 		return false, nil
 	}
-	return true, s.client.Read(ctx, chatGUID)
+	marked := false
+	for i, member := range members {
+		if !member.Live || newestInbound[i] > seen {
+			continue
+		}
+		if err := s.client.Read(ctx, member.GUID); err != nil {
+			return marked, err
+		}
+		marked = true
+	}
+	return marked, nil
 }
 
 func (s *Service) notify(method string, params json.RawMessage) {

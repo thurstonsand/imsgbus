@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +32,12 @@ type Client struct {
 
 	lock   sync.Mutex
 	cancel context.CancelFunc
-	// deleting holds the chats Beeper is deleting, whose deletion in Messages the chat watch
-	// would otherwise bring back to delete again.
+	// deleting holds the conversations Beeper is deleting, whose deletion in Messages the chat
+	// watch would otherwise bring back to delete again.
 	deleting map[string]bool
+	// filtered holds, for each conversation, whether Messages' filter sorted its newest message
+	// out of the conversation list, which its room follows by being low priority.
+	filtered map[string]bool
 	sends    sends
 }
 
@@ -55,6 +60,10 @@ func (c *Client) Connect(ctx context.Context) {
 	c.cancel = cancel
 	c.lock.Unlock()
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+	// Before anything queues an event to a portal it may delete.
+	if err := c.mergePortals(ctx); err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to merge the portals of a person's chats")
+	}
 	go c.syncChats(ctx)
 	go c.keep(ctx, "message watch", func() error {
 		err := c.core.Watch(ctx, c.cursor.position(), true, func(evt core.Event) { c.handle(ctx, evt) })
@@ -104,16 +113,28 @@ func (c *Client) keep(ctx context.Context, name string, run func() error) {
 	}
 }
 
-// syncChats brings every chat with a message into Beeper and refreshes its info. Only a new portal
-// backfills: the message watch replays what existing ones missed.
+// syncChats brings every conversation with a message into Beeper and refreshes its info. Only a
+// new portal backfills: the message watch replays what existing ones missed.
 func (c *Client) syncChats(ctx context.Context) {
 	chats, err := c.core.RecentChats(ctx, time.Time{})
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to list chats")
 		return
 	}
+	newest := map[string]core.Chat{}
 	for _, chat := range chats {
-		c.bringIn(chat.GUID, chat.LastMessage)
+		id := core.ConversationID(chat.GUID)
+		if known, ok := newest[id]; !ok || chat.LastMessage.After(known.LastMessage) {
+			newest[id] = chat
+		}
+	}
+	for id, chat := range newest {
+		if !chat.IsGroup {
+			c.lock.Lock()
+			c.filtered[id] = core.Filtered(chat.GUID)
+			c.lock.Unlock()
+		}
+		c.bringIn(id, chat.LastMessage)
 	}
 }
 
@@ -140,15 +161,24 @@ func (c *Client) handleChatState(ctx context.Context, s core.ChatState) {
 		c.bringIn(s.GUID, time.Time{})
 		return
 	}
+	id := core.ConversationID(s.GUID)
 	c.lock.Lock()
-	ours := c.deleting[s.GUID]
-	delete(c.deleting, s.GUID)
+	ours := c.deleting[id]
+	delete(c.deleting, id)
 	c.lock.Unlock()
 	if ours {
 		return
 	}
+	conversation, err := c.core.Conversation(ctx, s.GUID)
+	if err != nil {
+		log.Err(err).Msg("Failed to look up the conversation of a deleted chat")
+		return
+	}
+	if len(conversation.Chats) > 0 {
+		return
+	}
 	// Looking a portal up by key creates it, so only an existing room is deleted.
-	portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, c.portalKey(s.GUID))
+	portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, c.portalKey(id))
 	if err != nil {
 		log.Err(err).Msg("Failed to look up the portal of a deleted chat")
 		return
@@ -176,6 +206,9 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 			}
 		}
 		c.cursor.start(evt.RowID)
+		if !evt.IsGroup {
+			c.reclassify(evt.ChatGUID)
+		}
 		c.login.QueueRemoteEvent(&simplevent.Message[core.Message]{
 			Type:         bridgev2.RemoteEventMessage,
 			PortalKey:    c.portalKey(evt.ChatGUID),
@@ -235,6 +268,31 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 	}
 }
 
+// reclassify moves a conversation's room in or out of low priority when the chat its newest
+// message is in, which Messages' filter chose, is filtered and the one before wasn't, or the
+// other way round. Only a change moves it, since dropping the tag also drops Favourite.
+func (c *Client) reclassify(chatGUID string) {
+	id := core.ConversationID(chatGUID)
+	filtered := core.Filtered(chatGUID)
+	c.lock.Lock()
+	was, known := c.filtered[id]
+	c.filtered[id] = filtered
+	c.lock.Unlock()
+	if !known || was == filtered {
+		return
+	}
+	tag := event.RoomTag("")
+	if filtered {
+		tag = event.RoomTagLowPriority
+	}
+	c.login.Log.Info().Str("event", "reclassify").Str("chat_guid", chatGUID).Bool("filtered", filtered).Msg("Messages' filter moved a conversation")
+	c.login.QueueRemoteEvent(&simplevent.ChatResync{
+		Type:      bridgev2.RemoteEventChatResync,
+		PortalKey: c.portalKey(id),
+		ChatInfo:  &bridgev2.ChatInfo{UserLocal: &bridgev2.UserLocalPortalInfo{Tag: &tag}},
+	})
+}
+
 // logInbound records each event the watch hands to Beeper, with how long after it happened.
 // adoptGUID points the message Beeper sent as sent at guid, which Messages recorded as guid,
 // so receipts, tapbacks and edits on it find the event Beeper already shows.
@@ -292,7 +350,7 @@ func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 			// Groups report delivery and reads for no one in particular.
 			return
 		}
-		sender = bridgev2.EventSender{Sender: networkid.UserID(other)}
+		sender = bridgev2.EventSender{Sender: ghostID(other)}
 	}
 	evtType := bridgev2.RemoteEventReadReceipt
 	if r.Kind == core.Delivered {
@@ -328,7 +386,7 @@ func (c *Client) handleTyping(t core.Typing) {
 		EventMeta: simplevent.EventMeta{
 			Type:      bridgev2.RemoteEventTyping,
 			PortalKey: c.portalKey(t.ChatGUID),
-			Sender:    bridgev2.EventSender{Sender: networkid.UserID(other)},
+			Sender:    bridgev2.EventSender{Sender: ghostID(other)},
 		},
 		Timeout: timeout,
 	})
@@ -340,15 +398,22 @@ func otherHandle(chatGUID string) (string, bool) {
 	return after, ok
 }
 
+// portalKey is the portal of the conversation a chat is part of.
 func (c *Client) portalKey(chatGUID string) networkid.PortalKey {
-	return networkid.PortalKey{ID: networkid.PortalID(chatGUID), Receiver: c.login.ID}
+	return networkid.PortalKey{ID: networkid.PortalID(core.ConversationID(chatGUID)), Receiver: c.login.ID}
 }
 
 func (c *Client) sender(isFromMe bool, handle string) bridgev2.EventSender {
 	if isFromMe {
 		return c.self()
 	}
-	return bridgev2.EventSender{Sender: networkid.UserID(handle)}
+	return bridgev2.EventSender{Sender: ghostID(handle)}
+}
+
+// ghostID is the one ghost of a person, whichever chat Messages' filter put their message in.
+func ghostID(handle string) networkid.UserID {
+	address, _ := core.Address(handle)
+	return networkid.UserID(address)
 }
 
 func (c *Client) self() bridgev2.EventSender {
@@ -363,12 +428,37 @@ func (c *Client) IsThisUser(_ context.Context, userID networkid.UserID) bool {
 	return string(userID) == c.login.RemoteName
 }
 
+// GetChatInfo describes a conversation by the chat with its newest message, so its room is low
+// priority while Messages' filter has that chat out of the conversation list.
 func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	chat, err := c.core.Chat(ctx, string(portal.ID))
+	conversation, err := c.core.Conversation(ctx, string(portal.ID))
 	if err != nil {
 		return nil, err
 	}
-	return c.chatInfo(chat), nil
+	if len(conversation.Chats) == 0 {
+		return nil, fmt.Errorf("conversation %s has no chat left in Messages", portal.ID)
+	}
+	info, err := c.core.Chat(ctx, conversation.Chats[0])
+	if err != nil {
+		return nil, err
+	}
+	return c.chatInfo(info), nil
+}
+
+// target is the chat of a conversation that sends go to: the one Messages' filter left alone, as
+// a reply from the conversation list goes, or else the one with the newest message.
+func (c *Client) target(ctx context.Context, conversationID string) (string, error) {
+	conversation, err := c.core.Conversation(ctx, conversationID)
+	if err != nil {
+		return "", err
+	}
+	if len(conversation.Chats) == 0 {
+		return "", fmt.Errorf("conversation %s has no chat left in Messages", conversationID)
+	}
+	if slices.Contains(conversation.Chats, conversation.ID) {
+		return conversation.ID, nil
+	}
+	return conversation.Chats[0], nil
 }
 
 func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
@@ -378,7 +468,7 @@ func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
 	}
 	members.MemberMap.Set(bridgev2.ChatMember{EventSender: c.self()})
 	for _, handle := range chat.Participants {
-		members.MemberMap.Set(bridgev2.ChatMember{Sender: networkid.UserID(handle)})
+		members.MemberMap.Set(bridgev2.ChatMember{Sender: ghostID(handle)})
 	}
 	info := &bridgev2.ChatInfo{Members: members, CanBackfill: true}
 	if chat.IsGroup {
@@ -389,7 +479,7 @@ func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
 	} else {
 		info.Type = new(database.RoomTypeDM)
 		if len(chat.Participants) == 1 {
-			members.OtherUserID = networkid.UserID(chat.Participants[0])
+			members.OtherUserID = ghostID(chat.Participants[0])
 			// Messages files these under Transactions, Promotions or Unknown Senders.
 			if _, category := core.Address(chat.Participants[0]); category != "" {
 				info.UserLocal = &bridgev2.UserLocalPortalInfo{Tag: new(event.RoomTagLowPriority)}

@@ -103,6 +103,27 @@ func Address(handle string) (address, category string) {
 	return address, category
 }
 
+// ConversationID is the conversation a chat is part of. Messages' filter files a message from
+// someone not in Contacts under a chat of its own for each category, whose GUID carries the
+// category after the address ("any;-;+15551234567(smsft)"), so one person can have several chats;
+// their conversation is the GUID without it. A group is a conversation of its own.
+func ConversationID(chatGUID string) string {
+	prefix, handle, ok := strings.Cut(chatGUID, ";-;")
+	if !ok {
+		return chatGUID
+	}
+	address, _ := Address(handle)
+	return prefix + ";-;" + address
+}
+
+// Filtered is whether a chat is one Messages' filter keeps out of the conversation list, for
+// transactions, promotions, or unknown senders.
+func Filtered(chatGUID string) bool {
+	_, handle, _ := strings.Cut(chatGUID, ";-;")
+	_, category := Address(handle)
+	return category != ""
+}
+
 // classicTapbacks maps imsg's tapback types to the emoji they show as, and back.
 var classicTapbacks = map[string]string{
 	"love":     "❤️",
