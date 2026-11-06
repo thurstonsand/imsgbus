@@ -23,7 +23,7 @@ func main() {
 		Name:        "imsgbus",
 		Description: "One Mac's iMessage, served to Beeper over Matrix and to agents over MCP",
 		URL:         "https://github.com/thurstonsand/imsgbus",
-		Version:     "0.2.10",
+		Version:     "0.2.11",
 		Connector:   connector,
 	}
 	// The Matrix frontend owns the process through mxmain; the others start once it runs.

@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-11-06
+
 ### Fixed
 
 - Trying a failed send from Beeper again in Messages no longer brings a second copy of the message into Beeper: Messages resends it under the same GUID in uppercase, and the bridge now takes that as the message Beeper already shows.
