@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -29,8 +30,15 @@ type Client struct {
 	core   *core.Service
 	cursor *cursor
 
+	// merging keeps one migration of rooms to conversations running at a time.
+	merging sync.Mutex
+
 	lock   sync.Mutex
+	ctx    context.Context
 	cancel context.CancelFunc
+	// refill holds the conversations whose room took in others' chats and so may be missing
+	// their messages newer than its own.
+	refill map[string]bool
 	// deleting holds the conversations Beeper is deleting, whose deletion in Messages the chat
 	// watch would otherwise bring back to delete again.
 	deleting map[string]bool
@@ -56,11 +64,11 @@ const watchRetryDelay = 5 * time.Second
 func (c *Client) Connect(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	c.lock.Lock()
-	c.cancel = cancel
+	c.ctx, c.cancel = ctx, cancel
 	c.lock.Unlock()
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	// Before anything queues an event to a portal it may delete.
-	if err := c.mergePortals(ctx); err != nil {
+	if _, err := c.mergePortals(ctx); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to merge the portals of a person's chats")
 	}
 	go c.syncChats(ctx)
@@ -122,7 +130,7 @@ func (c *Client) syncChats(ctx context.Context) {
 	}
 	newest := map[string]core.Chat{}
 	for _, chat := range chats {
-		id := core.ConversationID(chat.GUID)
+		id := c.core.ConversationID(chat.GUID)
 		if known, ok := newest[id]; !ok || chat.LastMessage.After(known.LastMessage) {
 			newest[id] = chat
 		}
@@ -146,7 +154,11 @@ func (c *Client) bringIn(chatGUID string, lastMessage time.Time) {
 		GetChatInfoFunc: c.GetChatInfo,
 		LatestMessageTS: lastMessage,
 		CheckNeedsBackfillFunc: func(_ context.Context, latest *database.Message) (bool, error) {
-			return latest == nil, nil
+			c.lock.Lock()
+			defer c.lock.Unlock()
+			refill := c.refill[chatGUID]
+			delete(c.refill, chatGUID)
+			return latest == nil || refill, nil
 		},
 	})
 }
@@ -160,7 +172,7 @@ func (c *Client) handleChatState(ctx context.Context, s core.ChatState) {
 		c.bringIn(s.GUID, time.Time{})
 		return
 	}
-	id := core.ConversationID(s.GUID)
+	id := c.core.ConversationID(s.GUID)
 	c.lock.Lock()
 	ours := c.deleting[id]
 	delete(c.deleting, id)
@@ -271,7 +283,7 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 // message is in, which Messages' filter chose, is filtered and the one before wasn't, or the
 // other way round. Only a change moves it, since dropping the tag also drops Favourite.
 func (c *Client) reclassify(chatGUID string) {
-	id := core.ConversationID(chatGUID)
+	id := c.core.ConversationID(chatGUID)
 	filtered := core.Filtered(chatGUID)
 	c.lock.Lock()
 	was, known := c.filtered[id]
@@ -399,7 +411,7 @@ func otherHandle(chatGUID string) (string, bool) {
 
 // portalKey is the portal of the conversation a chat is part of.
 func (c *Client) portalKey(chatGUID string) networkid.PortalKey {
-	return networkid.PortalKey{ID: networkid.PortalID(core.ConversationID(chatGUID)), Receiver: c.login.ID}
+	return networkid.PortalKey{ID: networkid.PortalID(c.core.ConversationID(chatGUID)), Receiver: c.login.ID}
 }
 
 func (c *Client) sender(isFromMe bool, handle string) bridgev2.EventSender {
@@ -441,16 +453,26 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	if err != nil {
 		return nil, err
 	}
-	return c.chatInfo(info), nil
+	// A contact's conversation spans their addresses, so each one's ghost stays in the room.
+	var others []string
+	for _, guid := range conversation.Chats[1:] {
+		other, err := c.core.Chat(ctx, guid)
+		if err != nil {
+			return nil, err
+		}
+		others = append(others, other.Participants...)
+	}
+	return c.chatInfo(info, others...), nil
 }
 
-func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
+// chatInfo describes a chat, with others as more members of a one-on-one conversation.
+func (c *Client) chatInfo(chat core.Chat, others ...string) *bridgev2.ChatInfo {
 	members := &bridgev2.ChatMemberList{
 		IsFull:    true,
 		MemberMap: bridgev2.ChatMemberMap{},
 	}
 	members.MemberMap.Set(bridgev2.ChatMember{EventSender: c.self()})
-	for _, handle := range chat.Participants {
+	for _, handle := range append(slices.Clone(chat.Participants), others...) {
 		members.MemberMap.Set(bridgev2.ChatMember{Sender: ghostID(handle)})
 	}
 	info := &bridgev2.ChatInfo{Members: members, CanBackfill: true}

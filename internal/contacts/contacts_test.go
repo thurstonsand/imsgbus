@@ -1,7 +1,6 @@
 package contacts_test
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -14,115 +13,22 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/thurstonsand/imsgbus/internal/contacts"
+	"github.com/thurstonsand/imsgbus/internal/contacts/contactstest"
 )
 
-type person struct {
-	first, last, nickname, organization string
-	phones, emails                      []string
-	linkID                              string
-	preferred, preferredPhoto           bool
-	// thumbnail and image are stored as Contacts stores them, behind their storage marker.
-	thumbnail, image []byte
-}
-
-// writeStore writes people to a store with Contacts' own table and column names, in WAL mode, and
-// keeps its connection open so the rows stay in the write-ahead log, as they do on a live Mac.
-func writeStore(t *testing.T, path string, people ...person) *sql.DB {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite3", "file:"+path+"?_journal_mode=WAL")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	exec(t, db, `
-		CREATE TABLE Z_PRIMARYKEY (Z_ENT INTEGER PRIMARY KEY, Z_NAME VARCHAR);
-		INSERT INTO Z_PRIMARYKEY VALUES (19, 'ABCDGroup'), (22, 'ABCDContact');
-		CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, ZDISPLAYFLAGS INTEGER,
-			ZPREFERREDFORLINKNAME INTEGER, ZFIRSTNAME VARCHAR, ZLASTNAME VARCHAR, ZMIDDLENAME VARCHAR,
-			ZNICKNAME VARCHAR, ZORGANIZATION VARCHAR, ZLINKID VARCHAR, ZNAME VARCHAR,
-			ZPREFERREDFORLINKPHOTO INTEGER, ZTHUMBNAILIMAGEDATA BLOB, ZIMAGEDATA BLOB);
-		CREATE TABLE ZABCDPHONENUMBER (Z_PK INTEGER PRIMARY KEY, ZORDERINGINDEX INTEGER, ZOWNER INTEGER,
-			ZFULLNUMBER VARCHAR, ZLABEL VARCHAR);
-		CREATE TABLE ZABCDEMAILADDRESS (Z_PK INTEGER PRIMARY KEY, ZORDERINGINDEX INTEGER, ZOWNER INTEGER,
-			ZADDRESS VARCHAR, ZLABEL VARCHAR);
-		INSERT INTO ZABCDRECORD (Z_ENT, ZNAME) VALUES (19, 'Family');`)
-	for _, p := range people {
-		addPerson(t, db, p)
-	}
-	return db
-}
-
-func addPerson(t *testing.T, db *sql.DB, p person) {
-	t.Helper()
-	nullable := func(s string) any {
-		if s == "" {
-			return nil
-		}
-		return s
-	}
-	res, err := db.Exec(`INSERT INTO ZABCDRECORD (Z_ENT, ZDISPLAYFLAGS, ZPREFERREDFORLINKNAME, ZFIRSTNAME,
-		ZLASTNAME, ZNICKNAME, ZORGANIZATION, ZLINKID, ZPREFERREDFORLINKPHOTO, ZTHUMBNAILIMAGEDATA, ZIMAGEDATA)
-		VALUES (22, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.preferred, nullable(p.first), nullable(p.last), nullable(p.nickname), nullable(p.organization), nullable(p.linkID),
-		p.preferredPhoto, p.thumbnail, p.image)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner, err := res.LastInsertId()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, phone := range p.phones {
-		exec(t, db, `INSERT INTO ZABCDPHONENUMBER (ZORDERINGINDEX, ZOWNER, ZFULLNUMBER, ZLABEL)
-			VALUES (?, ?, ?, '_$!<Mobile>!$_')`, i, owner, phone)
-	}
-	for i, email := range p.emails {
-		exec(t, db, `INSERT INTO ZABCDEMAILADDRESS (ZORDERINGINDEX, ZOWNER, ZADDRESS, ZLABEL)
-			VALUES (?, ?, ?, 'school')`, i, owner, email)
-	}
-}
-
-func exec(t *testing.T, db *sql.DB, query string, args ...any) {
-	t.Helper()
-	if _, err := db.Exec(query, args...); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// addressBook writes a root store holding only a handle-less owner card, and one store per source,
-// in order, and opens the catalog over them.
-func addressBook(t *testing.T, sources ...[]person) (*contacts.Catalog, []*sql.DB) {
-	t.Helper()
-	dir := t.TempDir()
-	writeStore(t, filepath.Join(dir, "AddressBook-v22.abcddb"), person{first: "Alex"})
-	dbs := make([]*sql.DB, len(sources))
-	for i, people := range sources {
-		dbs[i] = writeStore(t, filepath.Join(dir, "Sources", fmt.Sprintf("%02d-SOURCE", i), "AddressBook-v22.abcddb"), people...)
-	}
-	catalog, err := contacts.Open(t.Context(), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return catalog, dbs
-}
-
 func TestHandleInTwoSourcesResolvesConsistently(t *testing.T) {
-	icloud := []person{
-		{first: "Dana", last: "Whitfield", phones: []string{"(555) 201-3344"}},
-		{first: "Robert", last: "Okafor", phones: []string{"555-201-7788"}},
-		{first: "Priya", last: "Natarajan", phones: []string{"555 201 9900"}, linkID: "LINK-1", preferred: true},
+	icloud := []contactstest.Person{
+		{First: "Dana", Last: "Whitfield", Phones: []string{"(555) 201-3344"}},
+		{First: "Robert", Last: "Okafor", Phones: []string{"555-201-7788"}},
+		{First: "Priya", Last: "Natarajan", Phones: []string{"555 201 9900"}, LinkID: "LINK-1", Preferred: true, ID: "B-PRIYA"},
 	}
-	google := []person{
-		{first: "Dana", last: "Whitfield", phones: []string{"+1 555 201 3344"}, emails: []string{"Dana.W@Example.com"}},
-		{first: "Bobby", last: "Okafor", phones: []string{"+15552017788"}},
-		{first: "P", last: "Natarajan", phones: []string{"+15552019900"}, linkID: "LINK-1"},
+	google := []contactstest.Person{
+		{First: "Dana", Last: "Whitfield", Phones: []string{"+1 555 201 3344"}, Emails: []string{"Dana.W@Example.com"}},
+		{First: "Bobby", Last: "Okafor", Phones: []string{"+15552017788"}},
+		{First: "P", Last: "Natarajan", Phones: []string{"+15552019900"}, LinkID: "LINK-1", ID: "A-PRIYA"},
 	}
-	for _, order := range [][][]person{{icloud, google}, {google, icloud}} {
-		catalog, _ := addressBook(t, order...)
+	for _, order := range [][][]contactstest.Person{{icloud, google}, {google, icloud}} {
+		catalog, _ := contactstest.AddressBook(t, order...)
 
 		if name, ok := catalog.Name("+15552013344"); name != "Dana Whitfield" || !ok {
 			t.Errorf("Name(Dana's number) = %q, %v; want Dana Whitfield", name, ok)
@@ -144,6 +50,10 @@ func TestHandleInTwoSourcesResolvesConsistently(t *testing.T) {
 		if name, ok := catalog.Name("+15552019900"); name != "Priya Natarajan" || !ok {
 			t.Errorf("Name(linked number) = %q, %v; want Priya Natarajan", name, ok)
 		}
+		// Linked cards keep one ID, whichever store loads first.
+		if priya, ok := catalog.ByID("A-PRIYA"); priya.Name != "Priya Natarajan" || !ok {
+			t.Errorf("ByID(A-PRIYA) = %q, %v; want Priya Natarajan", priya.Name, ok)
+		}
 	}
 }
 
@@ -151,15 +61,15 @@ func TestPhotosReadInlineAndExternal(t *testing.T) {
 	inline := func(data string) []byte { return append([]byte{1}, data...) }
 	external := func(name string) []byte { return append(append([]byte{2}, name...), 0) }
 	dir := t.TempDir()
-	writeStore(t, filepath.Join(dir, "AddressBook-v22.abcddb"))
+	contactstest.WriteStore(t, filepath.Join(dir, "AddressBook-v22.abcddb"))
 	source := filepath.Join(dir, "Sources", "00-SOURCE")
-	writeStore(t, filepath.Join(source, "AddressBook-v22.abcddb"),
-		person{first: "Thumb", last: "Over Image", phones: []string{"555-301-0001"}, thumbnail: inline("thumbnail"), image: inline("full image")},
-		person{first: "External", last: "File", phones: []string{"555-301-0002"}, image: external("8044FDE1-C993")},
-		person{first: "Not", last: "Downloaded", phones: []string{"555-301-0003"}, thumbnail: external("0E04AA96-AAE8")},
-		person{first: "Linked", last: "Plain", phones: []string{"555-301-0004"}, linkID: "LINK-2", preferred: true, image: inline("plain card")},
-		person{first: "Linked", last: "Chosen", phones: []string{"555-301-0005"}, linkID: "LINK-2", preferredPhoto: true, image: inline("chosen card")},
-		person{first: "No", last: "Photo", phones: []string{"555-301-0006"}},
+	contactstest.WriteStore(t, filepath.Join(source, "AddressBook-v22.abcddb"),
+		contactstest.Person{First: "Thumb", Last: "Over Image", Phones: []string{"555-301-0001"}, Thumbnail: inline("thumbnail"), Image: inline("full image")},
+		contactstest.Person{First: "External", Last: "File", Phones: []string{"555-301-0002"}, Image: external("8044FDE1-C993")},
+		contactstest.Person{First: "Not", Last: "Downloaded", Phones: []string{"555-301-0003"}, Thumbnail: external("0E04AA96-AAE8")},
+		contactstest.Person{First: "Linked", Last: "Plain", Phones: []string{"555-301-0004"}, LinkID: "LINK-2", Preferred: true, Image: inline("plain card")},
+		contactstest.Person{First: "Linked", Last: "Chosen", Phones: []string{"555-301-0005"}, LinkID: "LINK-2", PreferredPhoto: true, Image: inline("chosen card")},
+		contactstest.Person{First: "No", Last: "Photo", Phones: []string{"555-301-0006"}},
 	)
 	data := filepath.Join(source, ".AddressBook-v22_SUPPORT", "_EXTERNAL_DATA")
 	if err := os.MkdirAll(data, 0o750); err != nil {
@@ -189,10 +99,10 @@ func TestPhotosReadInlineAndExternal(t *testing.T) {
 }
 
 func TestPhoneFormatsMatch(t *testing.T) {
-	catalog, _ := addressBook(t, []person{
-		{first: "Ines", last: "Calloway", phones: []string{"(555) 123-4567"}},
-		{first: "Theo", last: "Brandt", phones: []string{"+1 555 765 4321"}},
-		{first: "Mara", last: "Quist", phones: []string{"5550001111"}, emails: []string{"Mara@Example.COM"}},
+	catalog, _ := contactstest.AddressBook(t, []contactstest.Person{
+		{First: "Ines", Last: "Calloway", Phones: []string{"(555) 123-4567"}},
+		{First: "Theo", Last: "Brandt", Phones: []string{"+1 555 765 4321"}},
+		{First: "Mara", Last: "Quist", Phones: []string{"5550001111"}, Emails: []string{"Mara@Example.COM"}},
 	})
 	for name, number := range map[string]string{"Ines Calloway": "5551234567", "Theo Brandt": "5557654321", "Mara Quist": "5550001111"} {
 		formats := []string{
@@ -212,14 +122,14 @@ func TestPhoneFormatsMatch(t *testing.T) {
 	}
 }
 
-var alexes = []person{
-	{first: "Alex", last: "Moreau", organization: "Lumen Labs", phones: []string{"5553100001"}},
-	{first: "Alex", last: "Varga", phones: []string{"5553100002"}},
-	{first: "Élodie", last: "Durand", nickname: "Lo", phones: []string{"5553100003"}},
+var alexes = []contactstest.Person{
+	{First: "Alex", Last: "Moreau", Organization: "Lumen Labs", Phones: []string{"5553100001"}},
+	{First: "Alex", Last: "Varga", Phones: []string{"5553100002"}},
+	{First: "Élodie", Last: "Durand", Nickname: "Lo", Phones: []string{"5553100003"}},
 }
 
 func TestFirstNameAmbiguityListsCandidates(t *testing.T) {
-	catalog, _ := addressBook(t, alexes)
+	catalog, _ := contactstest.AddressBook(t, alexes)
 	_, err := catalog.Resolve("alex")
 	var ambiguous *contacts.AmbiguousError
 	if !errors.As(err, &ambiguous) {
@@ -239,7 +149,7 @@ func TestFirstNameAmbiguityListsCandidates(t *testing.T) {
 }
 
 func TestFullNameBeatsFirstNameAmbiguity(t *testing.T) {
-	catalog, _ := addressBook(t, append([]person{{first: "Alex", phones: []string{"5553100004"}}}, alexes...))
+	catalog, _ := contactstest.AddressBook(t, append([]contactstest.Person{{First: "Alex", Phones: []string{"5553100004"}}}, alexes...))
 	for query, want := range map[string]string{
 		// A card named only "Alex" is a full-name match, ahead of both Alexes' first names.
 		"alex":          "Alex",
@@ -255,12 +165,12 @@ func TestFullNameBeatsFirstNameAmbiguity(t *testing.T) {
 }
 
 func TestWatchReloadsOnChange(t *testing.T) {
-	catalog, dbs := addressBook(t, []person{{first: "Ines", last: "Calloway", phones: []string{"5551234567"}}})
+	catalog, dbs := contactstest.AddressBook(t, []contactstest.Person{{First: "Ines", Last: "Calloway", Phones: []string{"5551234567"}}})
 	reloaded := make(chan struct{}, 1)
 	if err := catalog.Watch(t.Context(), zerolog.Nop(), func() { reloaded <- struct{}{} }); err != nil {
 		t.Fatal(err)
 	}
-	addPerson(t, dbs[0], person{first: "Theo", last: "Brandt", phones: []string{"5557654321"}})
+	contactstest.AddPerson(t, dbs[0], contactstest.Person{First: "Theo", Last: "Brandt", Phones: []string{"5557654321"}})
 	select {
 	case <-reloaded:
 	case <-time.After(10 * time.Second):

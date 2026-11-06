@@ -37,6 +37,9 @@ var ErrNotFound = errors.New("no contact matches")
 
 // Contact is one person, gathered from every card that describes them.
 type Contact struct {
+	// ID is the least of their cards' unique IDs, so it changes only when a card with a lesser one
+	// joins them or that card leaves; empty when no card has one.
+	ID           string
 	Name         string
 	Nickname     string
 	Organization string
@@ -87,6 +90,7 @@ type Catalog struct {
 	contacts []Contact
 	// owners maps a handle to the contacts that list it.
 	owners map[string][]int
+	byID   map[string]int
 }
 
 // Open loads the address book under dir, normally ~/Library/Application Support/AddressBook: its
@@ -106,6 +110,17 @@ func (c *Catalog) Lookup(handle string) (Contact, bool) {
 		return Contact{}, false
 	}
 	return c.contacts[owners[0]], true
+}
+
+// ByID is the contact with the given ID.
+func (c *Catalog) ByID(id string) (Contact, bool) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	i, ok := c.byID[id]
+	if !ok {
+		return Contact{}, false
+	}
+	return c.contacts[i], true
 }
 
 // Len is how many contacts the catalog holds.
@@ -173,14 +188,18 @@ func (c *Catalog) Reload(ctx context.Context) error {
 	}
 	contacts := merge(cards)
 	owners := make(map[string][]int)
+	byID := make(map[string]int, len(contacts))
 	for i, contact := range contacts {
+		if contact.ID != "" {
+			byID[contact.ID] = i
+		}
 		for _, h := range contact.Handles {
 			owners[h.Value] = append(owners[h.Value], i)
 		}
 	}
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	c.contacts, c.owners = contacts, owners
+	c.contacts, c.owners, c.byID = contacts, owners, byID
 	return nil
 }
 
@@ -246,7 +265,7 @@ func (c *Catalog) watchStores(watcher *fsnotify.Watcher) error {
 
 // card is one ABCDContact record in one store.
 type card struct {
-	name, first, middle, last, nickname, organization string
+	id, name, first, middle, last, nickname, organization string
 	// linkID joins the cards Contacts has linked as one person, across sources.
 	linkID string
 	// preferred and preferredPhoto mark the linked card whose name and photo the person shows.
@@ -273,7 +292,7 @@ func readStore(ctx context.Context, path string) ([]card, error) {
 		SELECT Z_PK, coalesce(ZFIRSTNAME, ''), coalesce(ZMIDDLENAME, ''), coalesce(ZLASTNAME, ''),
 			coalesce(ZNICKNAME, ''), coalesce(ZORGANIZATION, ''), coalesce(ZDISPLAYFLAGS, 0),
 			coalesce(ZLINKID, ''), coalesce(ZPREFERREDFORLINKNAME, 0), coalesce(ZPREFERREDFORLINKPHOTO, 0),
-			coalesce(ZTHUMBNAILIMAGEDATA, ZIMAGEDATA)
+			coalesce(ZTHUMBNAILIMAGEDATA, ZIMAGEDATA), coalesce(ZUNIQUEID, '')
 		FROM ZABCDRECORD
 		WHERE Z_ENT = (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ABCDContact')
 		ORDER BY Z_PK`)
@@ -287,7 +306,7 @@ func readStore(ctx context.Context, path string) ([]card, error) {
 		var pk, flags int64
 		var cd card
 		var image []byte
-		if err = rows.Scan(&pk, &cd.first, &cd.middle, &cd.last, &cd.nickname, &cd.organization, &flags, &cd.linkID, &cd.preferred, &cd.preferredPhoto, &image); err != nil {
+		if err = rows.Scan(&pk, &cd.first, &cd.middle, &cd.last, &cd.nickname, &cd.organization, &flags, &cd.linkID, &cd.preferred, &cd.preferredPhoto, &image, &cd.id); err != nil {
 			return nil, err
 		}
 		if cd.photo, err = readImage(path, image); err != nil {
@@ -427,9 +446,12 @@ func merge(cards []card) []Contact {
 		if !ok {
 			g = len(contacts)
 			group[root] = g
-			contacts = append(contacts, Contact{Name: cd.name, Nickname: cd.nickname, Organization: cd.organization})
+			contacts = append(contacts, Contact{ID: cd.id, Name: cd.name, Nickname: cd.nickname, Organization: cd.organization})
 		}
 		contact := &contacts[g]
+		if cd.id != "" && (contact.ID == "" || cd.id < contact.ID) {
+			contact.ID = cd.id
+		}
 		if cd.preferred {
 			contact.Name, contact.Nickname, contact.Organization = cd.name, cd.nickname, cd.organization
 		}
@@ -466,6 +488,19 @@ func fold(name string) string {
 // Normalize writes a handle the way iMessage does: an email lowercased, a phone number in E.164,
 // read as a US number when it has no country code.
 func Normalize(handle string) string {
+	if normalized, ok := normalized.Load(handle); ok {
+		return normalized.(string) //nolint:forcetypeassert // only strings are stored
+	}
+	n := normalize(handle)
+	normalized.Store(handle, n)
+	return n
+}
+
+// normalized remembers Normalize's answers: parsing a phone number is slow next to how often
+// every chat's handle is looked up.
+var normalized sync.Map
+
+func normalize(handle string) string {
 	handle = strings.TrimSpace(handle)
 	if strings.Contains(handle, "@") {
 		return strings.ToLower(handle)

@@ -103,11 +103,11 @@ func Address(handle string) (address, category string) {
 	return address, category
 }
 
-// ConversationID is the conversation a chat is part of. Messages' filter files a message from
-// someone not in Contacts under a chat of its own for each category, whose GUID carries the
-// category after the address ("any;-;+15551234567(smsft)"), so one person can have several chats;
-// their conversation is the GUID without it. A group is a conversation of its own.
-func ConversationID(chatGUID string) string {
+// addressConversation is the conversation a chat is part of among a single address's chats.
+// Messages' filter files a message from someone not in Contacts under a chat of its own for each
+// category, whose GUID carries the category after the address ("any;-;+15551234567(smsft)"), so
+// one address can have several chats; their conversation is the GUID without it.
+func addressConversation(chatGUID string) string {
 	prefix, handle, ok := strings.Cut(chatGUID, ";-;")
 	if !ok {
 		return chatGUID

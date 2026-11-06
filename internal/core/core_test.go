@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/thurstonsand/imsgbus/internal/contacts"
+	"github.com/thurstonsand/imsgbus/internal/contacts/contactstest"
 	"github.com/thurstonsand/imsgbus/internal/core"
 )
 
@@ -177,8 +178,13 @@ func startFake(t *testing.T, scenario string) *core.Service {
 
 func startFakeWith(t *testing.T, scenario, chatDB string) *core.Service {
 	t.Helper()
+	return startFakeWithContacts(t, scenario, chatDB, &contacts.Catalog{})
+}
+
+func startFakeWithContacts(t *testing.T, scenario, chatDB string, people *contacts.Catalog) *core.Service {
+	t.Helper()
 	t.Setenv(fakeScenario, scenario)
-	service, err := core.Start(zerolog.Nop(), core.Options{IMsgPath: os.Args[0], ChatDB: chatDB, Contacts: &contacts.Catalog{}})
+	service, err := core.Start(zerolog.Nop(), core.Options{IMsgPath: os.Args[0], ChatDB: chatDB, Contacts: people})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,14 +420,69 @@ func TestConversationJoinsAPersonsFilteredChats(t *testing.T) {
 	}
 }
 
+func TestConversationJoinsAContactsAddresses(t *testing.T) {
+	people, _ := contactstest.AddressBook(t, []contactstest.Person{
+		{Organization: "Top Notch", Phones: []string{"(555) 000-0001", "555-000-0002"}, ID: "CARD-T"},
+	})
+	service := startFakeWithContacts(t, "conversation", chatDB(t, map[int64]struct {
+		guid string
+		last time.Time
+	}{
+		70: {"any;-;+15550000001", time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)},
+		71: {"any;-;+15550000002", time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)},
+		// The filter put the newest message from the second number aside.
+		72: {"any;-;+15550000002(smsft)", time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)},
+		// Not in Contacts.
+		73: {"any;-;+15550000003", time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)},
+	}), people)
+	ctx := t.Context()
+
+	for guid, want := range map[string]string{
+		"any;-;+15550000001":        "contact;CARD-T",
+		"any;-;+15550000002(smsft)": "contact;CARD-T",
+		"contact;CARD-T":            "contact;CARD-T",
+		"any;-;+15550000003":        "any;-;+15550000003",
+		"contact;GONE":              "",
+	} {
+		if got := service.ConversationID(guid); got != want {
+			t.Errorf("ConversationID(%q) = %q; want %q", guid, got, want)
+		}
+	}
+	conversation, err := service.Conversation(ctx, "any;-;+15550000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(conversation.Chats, " "), "any;-;+15550000002(smsft) any;-;+15550000002 any;-;+15550000001"; got != want {
+		t.Errorf("chats %s; want %s", got, want)
+	}
+	// Sends go to the newest chat the filter left alone.
+	target, err := service.Target(ctx, "contact;CARD-T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "any;-;+15550000002" {
+		t.Errorf("target %s; want any;-;+15550000002", target)
+	}
+	// A send to one of the contact's addresses goes to that address, out of the filter if it can.
+	for guid, want := range map[string]string{
+		"any;-;+15550000001":        "any;-;+15550000001",
+		"any;-;+15550000002(smsft)": "any;-;+15550000002",
+	} {
+		if got, err := service.AddressTarget(ctx, guid); err != nil || got != want {
+			t.Errorf("AddressTarget(%s) = %s, %v; want %s", guid, got, err, want)
+		}
+	}
+}
+
 func TestConversationIDDropsTheFilterCategory(t *testing.T) {
+	service := startFake(t, "conversation")
 	for guid, want := range map[string]string{
 		"any;-;+15550000000(smsft_rm)": "any;-;+15550000000",
 		"any;-;+15550000000":           "any;-;+15550000000",
 		"any;-;24215(smsft_or)":        "any;-;24215",
 		"any;+;chat123(x)":             "any;+;chat123(x)",
 	} {
-		if got := core.ConversationID(guid); got != want {
+		if got := service.ConversationID(guid); got != want {
 			t.Errorf("ConversationID(%q) = %q; want %q", guid, got, want)
 		}
 	}

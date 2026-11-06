@@ -87,7 +87,15 @@ func (c *Connector) Core() *core.Service { return c.core }
 
 func (c *Connector) Start(ctx context.Context) error {
 	ctx = c.bridge.Log.With().Str("component", "ghosts").Logger().WithContext(context.WithoutCancel(ctx))
-	if err := c.contacts.Watch(ctx, *zerolog.Ctx(ctx), func() { c.refreshGhosts(ctx) }); err != nil {
+	reloaded := func() {
+		c.refreshGhosts(ctx)
+		for _, login := range c.bridge.GetAllCachedUserLogins() {
+			if client, ok := login.Client.(*Client); ok {
+				client.regroup()
+			}
+		}
+	}
+	if err := c.contacts.Watch(ctx, *zerolog.Ctx(ctx), reloaded); err != nil {
 		return fmt.Errorf("watch Contacts: %w", err)
 	}
 	go c.refreshGhosts(ctx)
@@ -163,6 +171,6 @@ func (c *Connector) LoadUserLogin(_ context.Context, login *bridgev2.UserLogin) 
 	if !ok {
 		return fmt.Errorf("login %s has metadata of type %T", login.ID, login.Metadata)
 	}
-	login.Client = &Client{login: login, core: c.core, cursor: newCursor(login, meta), deleting: map[string]bool{}, filtered: map[string]bool{}}
+	login.Client = &Client{login: login, core: c.core, cursor: newCursor(login, meta), deleting: map[string]bool{}, filtered: map[string]bool{}, refill: map[string]bool{}}
 	return nil
 }

@@ -457,6 +457,33 @@ func (s *Service) learn(c imsg.Chat) {
 	}
 }
 
+// contactConversation starts the ID of the conversation with someone in Contacts; their contact ID
+// follows it.
+const contactConversation = "contact;"
+
+// ConversationID is the conversation a chat is part of, by the chat's GUID or a conversation's
+// ID. Messages shows someone in Contacts as one conversation, whichever of their addresses a
+// message came through. Anyone else is a conversation per address, across the chats Messages'
+// filter splits it into, and a group is a conversation of its own. A conversation with someone
+// who has since left Contacts is no conversation, "".
+func (s *Service) ConversationID(id string) string {
+	if contactID, ok := strings.CutPrefix(id, contactConversation); ok {
+		if _, ok := s.contacts.ByID(contactID); !ok {
+			return ""
+		}
+		return id
+	}
+	id = addressConversation(id)
+	_, handle, direct := strings.Cut(id, ";-;")
+	if !direct {
+		return id
+	}
+	if contact, ok := s.contacts.Lookup(handle); ok && contact.ID != "" {
+		return contactConversation + contact.ID
+	}
+	return id
+}
+
 // Conversation is every chat with a conversation's other side that still has a message; see
 // ConversationID.
 type Conversation struct {
@@ -472,7 +499,7 @@ func (s *Service) Conversation(ctx context.Context, id string) (Conversation, er
 	if err != nil {
 		return Conversation{}, err
 	}
-	conversation := Conversation{ID: ConversationID(id)}
+	conversation := Conversation{ID: s.ConversationID(id)}
 	for _, m := range members {
 		if m.Live {
 			conversation.Chats = append(conversation.Chats, m.GUID)
@@ -481,26 +508,61 @@ func (s *Service) Conversation(ctx context.Context, id string) (Conversation, er
 	return conversation, nil
 }
 
-// Target is the chat of a conversation that sends go to: the one Messages' filter left alone, as
-// a reply from the conversation list goes, or else the one with the newest message.
+// Target is the chat of a conversation that sends go to, as a reply from Messages' conversation
+// list goes: the newest one its filter left alone, or else the newest.
 func (s *Service) Target(ctx context.Context, id string) (string, error) {
-	conversation, err := s.Conversation(ctx, id)
+	members, err := s.members(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	if len(conversation.Chats) == 0 {
-		return "", fmt.Errorf("conversation %s has no chat left in Messages", conversation.ID)
+	return target(members, id)
+}
+
+func target(members []chatdb.Member, id string) (string, error) {
+	members = slices.DeleteFunc(members, func(m chatdb.Member) bool { return !m.Live })
+	if len(members) == 0 {
+		return "", fmt.Errorf("conversation %s has no chat left in Messages", id)
 	}
-	if slices.Contains(conversation.Chats, conversation.ID) {
-		return conversation.ID, nil
+	if i := slices.IndexFunc(members, func(m chatdb.Member) bool { return !Filtered(m.GUID) }); i >= 0 {
+		return members[i].GUID, nil
 	}
-	return conversation.Chats[0], nil
+	return members[0].GUID, nil
+}
+
+// AddressTarget is where a send to the address of a one-on-one chat goes, for a sender who named
+// that address rather than its person: the newest chat at that address Messages' filter left
+// alone, or else the newest.
+func (s *Service) AddressTarget(ctx context.Context, chatGUID string) (string, error) {
+	address := addressConversation(chatGUID)
+	members, err := s.directChats(ctx, chatGUID, func(guid string) bool { return addressConversation(guid) == address })
+	if err != nil {
+		return "", err
+	}
+	return target(members, chatGUID)
 }
 
 // members returns the chats of the conversation a chat is part of, the one with the newest
 // message first.
 func (s *Service) members(ctx context.Context, id string) ([]chatdb.Member, error) {
-	members, err := chatdb.Members(ctx, s.chatDB, ConversationID(id))
+	conversation := s.ConversationID(id)
+	if !strings.HasPrefix(conversation, contactConversation) && !strings.Contains(conversation, ";-;") {
+		return s.chatsOf(ctx, id, []string{conversation})
+	}
+	return s.directChats(ctx, id, func(guid string) bool { return s.ConversationID(guid) == conversation })
+}
+
+// directChats returns the one-on-one chats keep picks, the one with the newest message first.
+func (s *Service) directChats(ctx context.Context, id string, keep func(guid string) bool) ([]chatdb.Member, error) {
+	direct, err := chatdb.DirectChats(ctx, s.chatDB)
+	if err != nil {
+		return nil, err
+	}
+	return s.chatsOf(ctx, id, slices.DeleteFunc(direct, func(guid string) bool { return !keep(guid) }))
+}
+
+// chatsOf returns the chats with the given GUIDs, newest message first, for a conversation id.
+func (s *Service) chatsOf(ctx context.Context, id string, guids []string) ([]chatdb.Member, error) {
+	members, err := chatdb.Members(ctx, s.chatDB, guids)
 	if err != nil {
 		return nil, err
 	}

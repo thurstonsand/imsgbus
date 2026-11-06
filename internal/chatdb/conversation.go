@@ -3,6 +3,7 @@ package chatdb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -17,9 +18,35 @@ type Member struct {
 	Last time.Time
 }
 
-// Members returns the chats whose GUID is id or id with a category in parentheses after it, as
-// Messages' text message filter names the chat of a message it sorted, newest message first.
-func Members(ctx context.Context, path, id string) ([]Member, error) {
+// DirectChats returns the GUIDs of every one-on-one chat.
+func DirectChats(ctx context.Context, path string) ([]string, error) {
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, `SELECT guid FROM chat WHERE instr(guid, ';-;') > 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var guids []string
+	for rows.Next() {
+		var guid string
+		if err := rows.Scan(&guid); err != nil {
+			return nil, err
+		}
+		guids = append(guids, guid)
+	}
+	return guids, rows.Err()
+}
+
+// Members returns the chats with the given GUIDs, newest message first.
+func Members(ctx context.Context, path string, guids []string) ([]Member, error) {
+	list, err := json.Marshal(guids)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
 	if err != nil {
 		return nil, err
@@ -28,8 +55,8 @@ func Members(ctx context.Context, path, id string) ([]Member, error) {
 	rows, err := db.QueryContext(ctx, `SELECT c.guid, c.ROWID, coalesce(max(m.date), 0) FROM chat c
 		LEFT JOIN chat_message_join j ON j.chat_id = c.ROWID
 		LEFT JOIN message m ON m.ROWID = j.message_id
-		WHERE c.guid = ? OR substr(c.guid, 1, length(?) + 1) = ? || '('
-		GROUP BY c.ROWID ORDER BY 3 DESC, c.ROWID DESC`, id, id, id)
+		WHERE c.guid IN (SELECT value FROM json_each(?))
+		GROUP BY c.ROWID ORDER BY 3 DESC, c.ROWID DESC`, string(list))
 	if err != nil {
 		return nil, err
 	}

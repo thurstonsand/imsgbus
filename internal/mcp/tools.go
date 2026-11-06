@@ -79,7 +79,7 @@ func (t *tools) message(m core.Message) Message {
 }
 
 // Chat is one conversation as agents see it. Messages files a person's messages under several
-// chats when its filter sorts some of them (see core.ConversationID); agents see them as one.
+// chats when its filter sorts some of them (see core.Service.ConversationID); agents see them as one.
 type Chat struct {
 	Chat        string    `json:"chat" jsonschema:"the chat's name, to pass to other tools"`
 	IsGroup     bool      `json:"is_group,omitempty"`
@@ -115,7 +115,7 @@ func (t *tools) listChats(ctx context.Context, _ *sdk.CallToolRequest, in listCh
 	var conversations []core.Chat
 	at := map[string]int{}
 	for _, c := range chats {
-		id := core.ConversationID(c.GUID)
+		id := t.core.ConversationID(c.GUID)
 		if i, ok := at[id]; ok {
 			conversations[i].Unread += c.Unread
 			continue
@@ -325,7 +325,11 @@ func (t *tools) sendMessage(ctx context.Context, _ *sdk.CallToolRequest, in send
 		}
 		return nil, sendOut{SentTo: t.person(to.address), Address: to.address, MessageID: guid}, nil
 	}
-	chatGUID, err := t.core.Target(ctx, to.chat.GUID)
+	pick := t.core.Target
+	if t.namesAddress(in.To) {
+		pick = t.core.AddressTarget
+	}
+	chatGUID, err := pick(ctx, to.chat.GUID)
 	if err != nil {
 		return nil, sendOut{}, err
 	}

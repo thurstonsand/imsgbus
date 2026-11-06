@@ -157,6 +157,16 @@ func (t *tools) handles(name string) ([]string, error) {
 	return handles, nil
 }
 
+// namesAddress reports whether name names one address rather than a person, so a send to it
+// goes to that address even when the person has others.
+func (t *tools) namesAddress(name string) bool {
+	name = strings.TrimSpace(name)
+	if m := labelled.FindStringSubmatch(name); m != nil && t.person(m[2]) == name {
+		return true
+	}
+	return isAddress(name)
+}
+
 // isAddress reports whether s is an email or a phone number iMessage can reach.
 func isAddress(s string) bool {
 	return addressRE.MatchString(s) && (strings.Contains(s, "@") || strings.HasPrefix(contacts.Normalize(s), "+"))
