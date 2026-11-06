@@ -344,7 +344,7 @@ func (s *Service) WatchChats(ctx context.Context, handle func(ChatState)) error 
 	return chatdb.WatchChats(ctx, s.chatDB, handle)
 }
 
-// DeleteChat erases a chat and its messages from Messages, skipping Recently Deleted.
+// DeleteChat moves a chat and its messages to Recently Deleted in Messages.
 func (s *Service) DeleteChat(ctx context.Context, chatGUID string) error {
 	return s.client.ChatsDelete(ctx, chatGUID)
 }

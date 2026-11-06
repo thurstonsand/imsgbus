@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Deleting a chat in Beeper moves it to Recently Deleted in Messages instead of erasing it, so it can be recovered there, which brings it back into Beeper. This needs imsg 0.21.0 (openclaw/imsg#381).
+
 ## [0.2.5] - 2026-11-05
 
 ### Fixed

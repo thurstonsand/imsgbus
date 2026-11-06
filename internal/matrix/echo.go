@@ -10,7 +10,7 @@ import (
 // echoWindow is how long after a send Messages' own row for it can still turn up.
 const echoWindow = time.Minute
 
-// sends holds the texts Beeper sent until Messages records them. imsg 0.20.0's send.tracked can
+// sends holds the texts Beeper sent until Messages records them. imsg's send.tracked can
 // report success while Messages saves the message under a GUID of its own, and that row would
 // otherwise come back into Beeper as a second copy of the message (openclaw/imsg#385).
 type sends struct {

@@ -216,7 +216,7 @@ func (c *Client) Read(ctx context.Context, chatGUID string) error {
 	return c.Call(ctx, "read", map[string]any{"chat_guid": chatGUID}, nil)
 }
 
-// ChatsDelete deletes a chat and its messages from Messages.
+// ChatsDelete moves a chat and its messages to Recently Deleted in Messages.
 func (c *Client) ChatsDelete(ctx context.Context, chatGUID string) error {
 	return c.Call(ctx, "chats.delete", map[string]any{"chat_guid": chatGUID}, nil)
 }
