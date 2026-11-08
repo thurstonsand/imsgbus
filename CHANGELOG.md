@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-11-08
+
 ### Changed
 
 - Someone in Contacts is one person in Beeper, as on every other network, however many of their addresses they write from: one ghost, named for them and listing all their addresses, in their own room and in every group. Beeper counts a room's people to tell a one-on-one chat from a group, so a contact with a number and an email no longer shows as a group, and a group no longer lists someone once per address. Their earlier messages and tapbacks move to that ghost, so a tapback they change later still replaces the one they gave from another address.
