@@ -654,6 +654,21 @@ func (s *Service) Photo(handle string) []byte {
 	return contact.Photo
 }
 
+// Identity is the person behind a handle, as the address that stands for them: a contact's
+// primary handle, whichever of their addresses the handle is, or else the handle's own address.
+func (s *Service) Identity(handle string) string {
+	address, _ := Address(handle)
+	if primary, ok := s.contacts.Primary(address); ok {
+		return primary
+	}
+	return address
+}
+
+// Contact is the one contact a handle belongs to.
+func (s *Service) Contact(handle string) (contacts.Contact, bool) {
+	return s.contacts.Lookup(handle)
+}
+
 // Person finds the one contact a name means; see contacts.Catalog.Resolve.
 func (s *Service) Person(name string) (contacts.Contact, error) {
 	return s.contacts.Resolve(name)

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -68,8 +67,11 @@ func (c *Client) Connect(ctx context.Context) {
 	c.lock.Unlock()
 	c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 	// Before anything queues an event to a portal it may delete.
-	if _, err := c.mergePortals(ctx); err != nil {
+	if err := c.mergePortals(ctx); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to merge the portals of a person's chats")
+	}
+	if err := c.rekeySenders(ctx); err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to move senders to their person")
 	}
 	go c.syncChats(ctx)
 	go c.keep(ctx, "message watch", func() error {
@@ -244,6 +246,8 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 		evtType := bridgev2.RemoteEventReaction
 		if evt.Removed {
 			evtType = bridgev2.RemoteEventReactionRemove
+		} else if !evt.IsFromMe {
+			c.removeMovedTapback(ctx, evt)
 		}
 		c.login.QueueRemoteEvent(&simplevent.Reaction{
 			Type:      evtType,
@@ -373,6 +377,36 @@ func (c *Client) logInbound(evt core.Event) {
 	log.Msg("Bridging event from iMessage")
 }
 
+// removeMovedTapback removes the tapback a new one replaces when rekeySenders moved it from
+// another ghost: bridgev2 would redact it as the person's ghost, which may not redact an event
+// it didn't send, so the bot removes it first.
+func (c *Client) removeMovedTapback(ctx context.Context, evt core.Tapback) {
+	person := c.ghostID(evt.Sender)
+	ghost, err := c.login.Bridge.GetGhostByID(ctx, person)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Str("ghost_id", string(person)).Msg("Failed to load the ghost of a tapback's sender")
+		return
+	}
+	reactions, err := c.login.Bridge.DB.Reaction.GetAllToMessageBySender(ctx, c.login.ID, networkid.MessageID(evt.Target), person)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Str("target", evt.Target).Msg("Failed to look up the tapback a new one replaces")
+		return
+	}
+	for _, r := range reactions {
+		if r.SenderMXID == ghost.Intent.GetMXID() {
+			continue
+		}
+		c.login.QueueRemoteEvent(&simplevent.Reaction{
+			Type:          bridgev2.RemoteEventReactionRemove,
+			PortalKey:     c.portalKey(evt.ChatGUID),
+			Sender:        bridgev2.EventSender{Sender: person},
+			Timestamp:     evt.Time,
+			TargetMessage: networkid.MessageID(evt.Target),
+			Emoji:         r.Emoji,
+		})
+	}
+}
+
 func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 	sender := c.self()
 	if r.IsFromMe {
@@ -381,7 +415,7 @@ func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 			// Groups report delivery and reads for no one in particular.
 			return
 		}
-		sender = bridgev2.EventSender{Sender: ghostID(other)}
+		sender = bridgev2.EventSender{Sender: c.ghostID(other)}
 	}
 	evtType := bridgev2.RemoteEventReadReceipt
 	if r.Kind == core.Delivered {
@@ -417,7 +451,7 @@ func (c *Client) handleTyping(t core.Typing) {
 		EventMeta: simplevent.EventMeta{
 			Type:      bridgev2.RemoteEventTyping,
 			PortalKey: c.portalKey(t.ChatGUID),
-			Sender:    bridgev2.EventSender{Sender: ghostID(other)},
+			Sender:    bridgev2.EventSender{Sender: c.ghostID(other)},
 		},
 		Timeout: timeout,
 	})
@@ -438,13 +472,14 @@ func (c *Client) sender(isFromMe bool, handle string) bridgev2.EventSender {
 	if isFromMe {
 		return c.self()
 	}
-	return bridgev2.EventSender{Sender: ghostID(handle)}
+	return bridgev2.EventSender{Sender: c.ghostID(handle)}
 }
 
-// ghostID is the one ghost of a person, whichever chat Messages' filter put their message in.
-func ghostID(handle string) networkid.UserID {
-	address, _ := core.Address(handle)
-	return networkid.UserID(address)
+// ghostID is the one ghost of a person, whichever of their addresses, and whichever chat Messages'
+// filter put their message in. Every other network's bridge has one ghost per person, and Beeper
+// counts a room's ghosts to tell a one-on-one chat from a group.
+func (c *Client) ghostID(handle string) networkid.UserID {
+	return networkid.UserID(c.core.Identity(handle))
 }
 
 func (c *Client) self() bridgev2.EventSender {
@@ -473,27 +508,18 @@ func (c *Client) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bri
 	if err != nil {
 		return nil, err
 	}
-	// A contact's conversation spans their addresses, so each one's ghost stays in the room.
-	var others []string
-	for _, guid := range conversation.Chats[1:] {
-		other, err := c.core.Chat(ctx, guid)
-		if err != nil {
-			return nil, err
-		}
-		others = append(others, other.Participants...)
-	}
-	return c.chatInfo(info, others...), nil
+	return c.chatInfo(info), nil
 }
 
-// chatInfo describes a chat, with others as more members of a one-on-one conversation.
-func (c *Client) chatInfo(chat core.Chat, others ...string) *bridgev2.ChatInfo {
+// chatInfo describes a chat.
+func (c *Client) chatInfo(chat core.Chat) *bridgev2.ChatInfo {
 	members := &bridgev2.ChatMemberList{
 		IsFull:    true,
 		MemberMap: bridgev2.ChatMemberMap{},
 	}
 	members.MemberMap.Set(bridgev2.ChatMember{EventSender: c.self()})
-	for _, handle := range append(slices.Clone(chat.Participants), others...) {
-		members.MemberMap.Set(bridgev2.ChatMember{Sender: ghostID(handle)})
+	for _, handle := range chat.Participants {
+		members.MemberMap.Set(bridgev2.ChatMember{Sender: c.ghostID(handle)})
 	}
 	info := &bridgev2.ChatInfo{Members: members, CanBackfill: true}
 	if chat.IsGroup {
@@ -504,7 +530,7 @@ func (c *Client) chatInfo(chat core.Chat, others ...string) *bridgev2.ChatInfo {
 	} else {
 		info.Type = new(database.RoomTypeDM)
 		if len(chat.Participants) == 1 {
-			members.OtherUserID = ghostID(chat.Participants[0])
+			members.OtherUserID = c.ghostID(chat.Participants[0])
 			// Messages files these under Transactions, Promotions or Unknown Senders.
 			if _, category := core.Address(chat.Participants[0]); category != "" {
 				info.UserLocal = &bridgev2.UserLocalPortalInfo{Tag: new(event.RoomTagLowPriority)}
@@ -518,20 +544,33 @@ func (c *Client) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev
 	return userInfo(c.core, ghost), nil
 }
 
-// userInfo shows a handle as its contact, with their photo, or as its address written out.
+// userInfo shows a ghost as its contact, with their photo and every address, or as its address
+// written out.
 func userInfo(service *core.Service, ghost *bridgev2.Ghost) *bridgev2.UserInfo {
-	handle := string(ghost.ID)
-	address, _ := core.Address(handle)
-	name := service.Name(handle)
-	if name == handle {
+	address := string(ghost.ID)
+	name := service.Name(address)
+	if name == address {
 		name = displayAddress(address)
 	}
-	identifier := "tel:" + address
-	if strings.Contains(address, "@") {
-		identifier = "mailto:" + address
+	addresses := []string{address}
+	if contact, ok := service.Contact(address); ok {
+		addresses = addresses[:0]
+		for _, h := range contact.Handles {
+			// A handle another contact also lists has a ghost of its own.
+			if service.Identity(h.Value) == address {
+				addresses = append(addresses, h.Value)
+			}
+		}
 	}
-	info := &bridgev2.UserInfo{Name: &name, Identifiers: []string{identifier}}
-	if photo := service.Photo(handle); photo != nil {
+	identifiers := make([]string, len(addresses))
+	for i, a := range addresses {
+		identifiers[i] = "tel:" + a
+		if strings.Contains(a, "@") {
+			identifiers[i] = "mailto:" + a
+		}
+	}
+	info := &bridgev2.UserInfo{Name: &name, Identifiers: identifiers}
+	if photo := service.Photo(address); photo != nil {
 		sum := sha256.Sum256(photo)
 		info.Avatar = &bridgev2.Avatar{
 			ID:  networkid.AvatarID(hex.EncodeToString(sum[:8])),

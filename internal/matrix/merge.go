@@ -4,24 +4,26 @@ import (
 	"context"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 // mergePortals leaves each conversation one portal, keyed by its ID, as conversations change: an
 // address added to a contact joins their conversation, and one removed leaves it. A one-on-one
-// room follows its other person's address, so a contact whose ID changed keeps their room. A
+// room whose contact is gone follows its other person's address, so a contact whose ID changed
+// keeps their room. A
 // conversation with several portals keeps the room with the most messages, under its new key,
 // and loses the others; the room it keeps backfills the history of every chat it now holds from
 // before its oldest message and after its newest, but not between them, where a room takes no
-// history. A room whose conversation is gone is deleted. It reports whether it changed anything,
-// and changes nothing once every portal is keyed by its conversation.
-func (c *Client) mergePortals(ctx context.Context) (bool, error) {
+// history. A room whose conversation is gone is deleted. It changes nothing once every portal is
+// keyed by its conversation.
+func (c *Client) mergePortals(ctx context.Context) error {
 	c.merging.Lock()
 	defer c.merging.Unlock()
 	portals, err := c.login.Bridge.DB.Portal.GetAll(ctx)
 	if err != nil {
-		return false, err
+		return err
 	}
 	byConversation := map[string][]*database.Portal{}
 	for _, p := range portals {
@@ -29,22 +31,21 @@ func (c *Client) mergePortals(ctx context.Context) (bool, error) {
 			continue
 		}
 		id := c.core.ConversationID(string(p.ID))
-		if p.OtherUserID != "" {
+		if id == "" && p.OtherUserID != "" {
 			id = c.core.ConversationID(oneOnOne + string(p.OtherUserID))
 		}
 		byConversation[id] = append(byConversation[id], p)
 	}
-	changed, backfill := false, false
+	backfill := false
 	for id, merging := range byConversation {
 		log := c.login.Log.With().Str("event", "merge_portals").Str("conversation", id).Int("portals", len(merging)).Logger()
 		if len(merging) == 1 && string(merging[0].ID) == id {
 			continue
 		}
-		changed = true
 		var keep *database.Portal
 		if id != "" {
 			if keep, err = c.largestRoom(ctx, merging); err != nil {
-				return changed, err
+				return err
 			}
 		}
 		for _, p := range merging {
@@ -52,7 +53,7 @@ func (c *Client) mergePortals(ctx context.Context) (bool, error) {
 				continue
 			}
 			if err := c.deletePortal(ctx, p.PortalKey); err != nil {
-				return changed, err
+				return err
 			}
 			log.Info().Str("portal", string(p.ID)).Msg("Deleted a room merged into another, or whose conversation is gone")
 		}
@@ -62,17 +63,17 @@ func (c *Client) mergePortals(ctx context.Context) (bool, error) {
 		if string(keep.ID) != id {
 			result, _, err := c.login.Bridge.ReIDPortal(ctx, keep.PortalKey, c.portalKey(id))
 			if err != nil {
-				return changed, err
+				return err
 			}
 			log.Info().Str("portal", string(keep.ID)).Stringer("result", result).Msg("Moved a room to its conversation")
 		}
 		if len(merging) > 1 {
 			key := c.portalKey(id)
 			if err := c.login.Bridge.DB.BackfillTask.EnsureExists(ctx, key, c.login.ID); err != nil {
-				return changed, err
+				return err
 			}
 			if err := c.login.Bridge.DB.BackfillTask.MarkNotDone(ctx, key, c.login.ID); err != nil {
-				return changed, err
+				return err
 			}
 			c.lock.Lock()
 			c.refill[id] = true
@@ -83,7 +84,7 @@ func (c *Client) mergePortals(ctx context.Context) (bool, error) {
 	if backfill {
 		c.login.Bridge.WakeupBackfillQueue()
 	}
-	return changed, nil
+	return nil
 }
 
 // oneOnOne starts the GUID of a one-on-one chat; the other person's address follows it.
@@ -125,6 +126,47 @@ func (c *Client) deletePortal(ctx context.Context, key networkid.PortalKey) erro
 	return nil
 }
 
+// rekeySenders moves the messages and reactions of a ghost that no longer stands for anyone to
+// the ghost of the person who sent them, as an address joins a contact or their primary address
+// changes, so that a tapback someone changes later replaces the one they gave from another
+// address.
+func (c *Client) rekeySenders(ctx context.Context) error {
+	db := c.login.Bridge.DB
+	rows, err := db.Query(ctx, `
+		SELECT sender_id FROM message WHERE bridge_id = $1 AND room_receiver = $2 AND sender_id <> $3
+		UNION SELECT sender_id FROM reaction WHERE bridge_id = $1 AND room_receiver = $2 AND sender_id <> $3`,
+		c.login.Bridge.ID, c.login.ID, c.login.RemoteName)
+	senders, err := dbutil.NewRowIterWithError(rows, dbutil.ScanSingleColumn[networkid.UserID], err).AsList()
+	if err != nil {
+		return err
+	}
+	log := zerolog.Ctx(ctx)
+	for _, old := range senders {
+		person := c.ghostID(string(old))
+		if person == old {
+			continue
+		}
+		if _, err := c.login.Bridge.GetGhostByID(ctx, person); err != nil {
+			return err
+		}
+		// The old ghost still sent a moved reaction in the room, and only it or the bot may redact
+		// it; the bot does, so removing one doesn't bring the old ghost back. A reaction the person
+		// gave from both addresses keeps the old one, which is harmless.
+		_, err := db.Exec(ctx, `UPDATE message SET sender_id = $4 WHERE bridge_id = $1 AND room_receiver = $2 AND sender_id = $3`,
+			c.login.Bridge.ID, c.login.ID, old, person)
+		if err != nil {
+			return err
+		}
+		_, err = db.Exec(ctx, `UPDATE OR IGNORE reaction SET sender_id = $4, sender_mxid = $5 WHERE bridge_id = $1 AND room_receiver = $2 AND sender_id = $3`,
+			c.login.Bridge.ID, c.login.ID, old, person, c.login.Bridge.Bot.GetMXID())
+		if err != nil {
+			return err
+		}
+		log.Info().Str("event", "rekey_senders").Str("from", string(old)).Str("to", string(person)).Msg("Moved a ghost's messages and reactions to their person")
+	}
+	return nil
+}
+
 // regroup brings rooms in line with conversations after Contacts changes, while connected.
 func (c *Client) regroup() {
 	c.lock.Lock()
@@ -133,11 +175,12 @@ func (c *Client) regroup() {
 	if ctx == nil || ctx.Err() != nil {
 		return
 	}
-	changed, err := c.mergePortals(ctx)
-	if err != nil {
+	if err := c.mergePortals(ctx); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to regroup rooms after Contacts changed")
 	}
-	if changed {
-		c.syncChats(ctx)
+	if err := c.rekeySenders(ctx); err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to move senders to their person after Contacts changed")
 	}
+	// Any room may hold a ghost that no longer stands for anyone, even one that never sent.
+	c.syncChats(ctx)
 }

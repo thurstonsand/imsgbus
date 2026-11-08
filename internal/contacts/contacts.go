@@ -123,6 +123,29 @@ func (c *Catalog) ByID(id string) (Contact, bool) {
 	return c.contacts[i], true
 }
 
+// Primary is the handle that stands for the contact listing handle, whichever of their handles
+// it is: the least of their phone numbers, or else of their email addresses, among the handles
+// no other contact lists.
+func (c *Catalog) Primary(handle string) (string, bool) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	owners := c.owners[Normalize(handle)]
+	if len(owners) != 1 {
+		return "", false
+	}
+	var primary string
+	for _, h := range c.contacts[owners[0]].Handles {
+		if len(c.owners[h.Value]) != 1 {
+			continue
+		}
+		email, primaryEmail := strings.Contains(h.Value, "@"), strings.Contains(primary, "@")
+		if primary == "" || (primaryEmail && !email) || (email == primaryEmail && h.Value < primary) {
+			primary = h.Value
+		}
+	}
+	return primary, true
+}
+
 // Len is how many contacts the catalog holds.
 func (c *Catalog) Len() int {
 	c.lock.RLock()
