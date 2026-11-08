@@ -18,8 +18,10 @@ import (
 type Person struct {
 	First, Last, Nickname, Organization string
 	Phones, Emails                      []string
-	LinkID                              string
-	Preferred, PreferredPhoto           bool
+	// PrimaryPhone is the phone the card marks primary; the first one when empty.
+	PrimaryPhone              string
+	LinkID                    string
+	Preferred, PreferredPhoto bool
 	// Thumbnail and Image are stored as Contacts stores them, behind their storage marker.
 	Thumbnail, Image []byte
 	// ID is the card's unique ID; a random one when empty.
@@ -47,9 +49,9 @@ func WriteStore(t *testing.T, path string, people ...Person) *sql.DB {
 			ZNICKNAME VARCHAR, ZORGANIZATION VARCHAR, ZLINKID VARCHAR, ZNAME VARCHAR,
 			ZPREFERREDFORLINKPHOTO INTEGER, ZTHUMBNAILIMAGEDATA BLOB, ZIMAGEDATA BLOB, ZUNIQUEID VARCHAR);
 		CREATE TABLE ZABCDPHONENUMBER (Z_PK INTEGER PRIMARY KEY, ZORDERINGINDEX INTEGER, ZOWNER INTEGER,
-			ZFULLNUMBER VARCHAR, ZLABEL VARCHAR);
+			ZFULLNUMBER VARCHAR, ZLABEL VARCHAR, ZISPRIMARY INTEGER);
 		CREATE TABLE ZABCDEMAILADDRESS (Z_PK INTEGER PRIMARY KEY, ZORDERINGINDEX INTEGER, ZOWNER INTEGER,
-			ZADDRESS VARCHAR, ZLABEL VARCHAR);
+			ZADDRESS VARCHAR, ZLABEL VARCHAR, ZISPRIMARY INTEGER);
 		INSERT INTO ZABCDRECORD (Z_ENT, ZNAME) VALUES (19, 'Family');`)
 	for _, p := range people {
 		AddPerson(t, db, p)
@@ -83,12 +85,13 @@ func AddPerson(t *testing.T, db *sql.DB, p Person) {
 		t.Fatal(err)
 	}
 	for i, phone := range p.Phones {
-		exec(t, db, `INSERT INTO ZABCDPHONENUMBER (ZORDERINGINDEX, ZOWNER, ZFULLNUMBER, ZLABEL)
-			VALUES (?, ?, ?, '_$!<Mobile>!$_')`, i, owner, phone)
+		primary := phone == p.PrimaryPhone || (p.PrimaryPhone == "" && i == 0)
+		exec(t, db, `INSERT INTO ZABCDPHONENUMBER (ZORDERINGINDEX, ZOWNER, ZFULLNUMBER, ZLABEL, ZISPRIMARY)
+			VALUES (?, ?, ?, '_$!<Mobile>!$_', ?)`, i, owner, phone, primary)
 	}
 	for i, email := range p.Emails {
-		exec(t, db, `INSERT INTO ZABCDEMAILADDRESS (ZORDERINGINDEX, ZOWNER, ZADDRESS, ZLABEL)
-			VALUES (?, ?, ?, 'school')`, i, owner, email)
+		exec(t, db, `INSERT INTO ZABCDEMAILADDRESS (ZORDERINGINDEX, ZOWNER, ZADDRESS, ZLABEL, ZISPRIMARY)
+			VALUES (?, ?, ?, 'school', ?)`, i, owner, email, i == 0)
 	}
 }
 

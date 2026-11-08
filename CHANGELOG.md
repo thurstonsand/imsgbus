@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The address that stands for someone in Contacts is the phone number their card marks primary, rather than their least phone number, so their ghost carries the number Contacts shows first, and changing the primary number in Contacts changes it.
+
 ## [0.2.12] - 2026-11-08
 
 ### Changed

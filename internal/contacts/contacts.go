@@ -49,6 +49,8 @@ type Contact struct {
 
 	// fullNames, nicknames and firstNames are the folded names Resolve matches, from every card.
 	fullNames, nicknames, firstNames []string
+	// primaries are the handles a card marks as its primary phone number or email address.
+	primaries []string
 }
 
 // Handle is a phone number in E.164 or a lowercase email address, with its card's label, such as
@@ -124,8 +126,8 @@ func (c *Catalog) ByID(id string) (Contact, bool) {
 }
 
 // Primary is the handle that stands for the contact listing handle, whichever of their handles
-// it is: the least of their phone numbers, or else of their email addresses, among the handles
-// no other contact lists.
+// it is, among the handles no other contact lists: a phone number over an email address, the one
+// their card marks primary over the rest, then the least, so it never depends on load order.
 func (c *Catalog) Primary(handle string) (string, bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -133,17 +135,25 @@ func (c *Catalog) Primary(handle string) (string, bool) {
 	if len(owners) != 1 {
 		return "", false
 	}
+	contact := c.contacts[owners[0]]
 	var primary string
-	for _, h := range c.contacts[owners[0]].Handles {
-		if len(c.owners[h.Value]) != 1 {
-			continue
-		}
-		email, primaryEmail := strings.Contains(h.Value, "@"), strings.Contains(primary, "@")
-		if primary == "" || (primaryEmail && !email) || (email == primaryEmail && h.Value < primary) {
+	for _, h := range contact.Handles {
+		if len(c.owners[h.Value]) == 1 && (primary == "" || outranks(contact, h.Value, primary)) {
 			primary = h.Value
 		}
 	}
 	return primary, true
+}
+
+// outranks is whether handle a stands for contact rather than handle b.
+func outranks(contact Contact, a, b string) bool {
+	if aEmail, bEmail := strings.Contains(a, "@"), strings.Contains(b, "@"); aEmail != bEmail {
+		return bEmail
+	}
+	if aMarked, bMarked := slices.Contains(contact.primaries, a), slices.Contains(contact.primaries, b); aMarked != bMarked {
+		return aMarked
+	}
+	return a < b
 }
 
 // Len is how many contacts the catalog holds.
@@ -295,6 +305,7 @@ type card struct {
 	preferred, preferredPhoto bool
 	photo                     []byte
 	handles                   []Handle
+	primaries                 []string
 }
 
 func readStore(ctx context.Context, path string) ([]card, error) {
@@ -354,9 +365,9 @@ func readStore(ctx context.Context, path string) ([]card, error) {
 	}
 
 	for _, query := range []string{
-		`SELECT ZOWNER, ZFULLNUMBER, coalesce(ZLABEL, '') FROM ZABCDPHONENUMBER
+		`SELECT ZOWNER, ZFULLNUMBER, coalesce(ZLABEL, ''), coalesce(ZISPRIMARY, 0) FROM ZABCDPHONENUMBER
 			WHERE ZOWNER IS NOT NULL AND ZFULLNUMBER IS NOT NULL ORDER BY ZOWNER, ZORDERINGINDEX`,
-		`SELECT ZOWNER, ZADDRESS, coalesce(ZLABEL, '') FROM ZABCDEMAILADDRESS
+		`SELECT ZOWNER, ZADDRESS, coalesce(ZLABEL, ''), coalesce(ZISPRIMARY, 0) FROM ZABCDEMAILADDRESS
 			WHERE ZOWNER IS NOT NULL AND ZADDRESS IS NOT NULL ORDER BY ZOWNER, ZORDERINGINDEX`,
 	} {
 		if err := readHandles(ctx, tx, query, cards, index); err != nil {
@@ -405,7 +416,8 @@ func readHandles(ctx context.Context, tx *sql.Tx, query string, cards []card, in
 	for rows.Next() {
 		var owner int64
 		var value, label string
-		if err := rows.Scan(&owner, &value, &label); err != nil {
+		var primary bool
+		if err := rows.Scan(&owner, &value, &label, &primary); err != nil {
 			return err
 		}
 		i, ok := index[owner]
@@ -418,6 +430,9 @@ func readHandles(ctx context.Context, tx *sql.Tx, query string, cards []card, in
 		}
 		if value = Normalize(value); value != "" {
 			cards[i].handles = append(cards[i].handles, Handle{Value: value, Label: label})
+			if primary {
+				cards[i].primaries = append(cards[i].primaries, value)
+			}
 		}
 	}
 	return rows.Err()
@@ -486,6 +501,7 @@ func merge(cards []card) []Contact {
 				contact.Handles = append(contact.Handles, h)
 			}
 		}
+		contact.primaries = append(contact.primaries, cd.primaries...)
 		contact.fullNames = appendFolded(contact.fullNames, cd.name, cd.first+" "+cd.last, cd.first+" "+cd.middle+" "+cd.last)
 		contact.nicknames = appendFolded(contact.nicknames, cd.nickname)
 		contact.firstNames = appendFolded(contact.firstNames, cd.first)

@@ -59,14 +59,15 @@ func TestHandleInTwoSourcesResolvesConsistently(t *testing.T) {
 
 func TestPrimaryStandsForEveryHandleOfAContact(t *testing.T) {
 	catalog, _ := contactstest.AddressBook(t, []contactstest.Person{
-		{First: "Ana", Last: "Reyes", Phones: []string{"555-201-1111", "555-201-0002"}, Emails: []string{"ana@example.com"}},
+		{First: "Ana", Last: "Reyes", Phones: []string{"555-201-0002", "555-201-1111"}, PrimaryPhone: "555-201-1111", Emails: []string{"ana@example.com"}},
 		{First: "Ben", Last: "Ito", Phones: []string{"555-201-3333"}, Emails: []string{"ben@example.com"}},
 		{First: "Cal", Last: "Moss", Phones: []string{"(555) 201-3333"}},
 	})
 	for handle, want := range map[string]string{
-		// The least phone number, not the first one listed, from any of the contact's handles.
-		"ana@example.com": "+15552010002",
-		"+15552011111":    "+15552010002",
+		// The phone number the card marks primary, neither the least nor the first one listed, from
+		// any of the contact's handles.
+		"ana@example.com": "+15552011111",
+		"+15552010002":    "+15552011111",
 		// A number another contact also lists stands for neither, so Ben falls back to his email.
 		"ben@example.com": "ben@example.com",
 	} {
