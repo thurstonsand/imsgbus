@@ -44,3 +44,5 @@ mise run clean          # Remove build artifacts
 ## Changelog
 
 A user-facing change adds its entry under `## [Unreleased]` in `CHANGELOG.md`. Released sections are `## [X.Y.Z] - YYYY-MM-DD`, newest first; `mise run lint:changelog` enforces the format and that the latest release is `main.go`'s `Version`.
+
+Versions follow semantic versioning: a release with any new feature (an `Added` entry), a raised floor (a higher minimum Pi, Node, OS, or other dependency version), or anything breaking is at least minor, and breaking is major from 1.0 on; patch is only for fixes and dependency updates.
