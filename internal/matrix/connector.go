@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/rs/zerolog"
 	up "go.mau.fi/util/configupgrade"
@@ -146,7 +147,14 @@ func (c *Connector) GetDBMetaTypes() database.MetaTypes {
 }
 
 func (c *Connector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
-	return &bridgev2.NetworkGeneralCapabilities{}
+	return &bridgev2.NetworkGeneralCapabilities{
+		// A text from Beeper stays pending until Messages' row for it comes back; see sends.
+		OutgoingMessageTimeouts: &bridgev2.OutgoingTimeoutConfig{
+			CheckInterval: 15 * time.Second,
+			NoEchoTimeout: echoWindow,
+			NoEchoMessage: "Messages hasn't recorded this message, so it may not have been sent",
+		},
+	}
 }
 
 func (c *Connector) GetConfig() (string, any, up.Upgrader) {

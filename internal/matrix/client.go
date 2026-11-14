@@ -212,14 +212,14 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 	c.logInbound(evt)
 	switch evt := evt.(type) {
 	case core.Message:
+		// A send from Beeper is pending under the GUID it was sent with, which its row may not have.
+		txn := evt.GUID
 		if evt.IsFromMe {
 			if sent := c.sends.echoOf(evt.ChatGUID, evt.GUID, evt.Text, evt.Time); sent != "" {
-				c.adoptGUID(ctx, evt.ChatGUID, sent, evt.GUID)
-				return
-			}
-			if c.isRetry(ctx, evt.ChatGUID, evt.GUID) {
-				c.adoptGUID(ctx, evt.ChatGUID, strings.ToLower(evt.GUID), evt.GUID)
-				return
+				txn = sent
+				if sent != evt.GUID {
+					c.login.Log.Info().Str("chat_guid", evt.ChatGUID).Str("sent_guid", sent).Str("guid", evt.GUID).Msg("Messages recorded a send from Beeper under another GUID")
+				}
 			}
 		}
 		c.cursor.start(evt.RowID)
@@ -237,7 +237,7 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 				c.cursor.finish(ctx, evt.RowID)
 			},
 			ID:                 networkid.MessageID(evt.GUID),
-			TransactionID:      networkid.TransactionID(evt.GUID),
+			TransactionID:      networkid.TransactionID(txn),
 			Data:               evt,
 			ConvertMessageFunc: convertMessage,
 		})
@@ -312,45 +312,7 @@ func (c *Client) reclassify(chatGUID string) {
 	})
 }
 
-// isRetry says whether guid is Messages' retry of a send from Beeper. imsg records sends under
-// the lowercase GUID imsgbus picks, and Try Again in Messages sends the failed message again as a
-// new row under the same GUID in uppercase, minutes later or not at all.
-func (c *Client) isRetry(ctx context.Context, chatGUID, guid string) bool {
-	sent := strings.ToLower(guid)
-	if sent == guid {
-		return false
-	}
-	msg, err := c.login.Bridge.DB.Message.GetPartByID(ctx, c.portalKey(chatGUID).Receiver, networkid.MessageID(sent), "")
-	if err != nil {
-		zerolog.Ctx(ctx).Err(err).Str("guid", guid).Msg("Failed to look up a send this may retry")
-		return false
-	}
-	return msg != nil
-}
-
 // logInbound records each event the watch hands to Beeper, with how long after it happened.
-// adoptGUID points the message Beeper sent as sent at guid, which Messages recorded as guid,
-// so receipts, tapbacks and edits on it find the event Beeper already shows.
-func (c *Client) adoptGUID(ctx context.Context, chatGUID, sent, guid string) {
-	log := zerolog.Ctx(ctx).With().Str("chat_guid", chatGUID).Str("sent_guid", sent).Str("guid", guid).Logger()
-	msg, err := c.login.Bridge.DB.Message.GetPartByID(ctx, c.portalKey(chatGUID).Receiver, networkid.MessageID(sent), "")
-	if err != nil {
-		log.Err(err).Msg("Dropped Messages' copy of a send from Beeper, but failed to look up the message")
-		return
-	}
-	if msg == nil {
-		// A file's caption is never saved as a message of its own.
-		log.Info().Msg("Dropped Messages' copy of a send from Beeper recorded under another GUID")
-		return
-	}
-	msg.ID = networkid.MessageID(guid)
-	if err = c.login.Bridge.DB.Message.Update(ctx, msg); err != nil {
-		log.Err(err).Msg("Dropped Messages' copy of a send from Beeper, but failed to point the message at it")
-		return
-	}
-	log.Info().Msg("Matched Messages' copy of a send from Beeper recorded under another GUID")
-}
-
 func (c *Client) logInbound(evt core.Event) {
 	log := c.login.Log.Info().Str("event", "inbound")
 	var at time.Time

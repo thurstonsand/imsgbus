@@ -360,12 +360,21 @@ func (s *Service) DeleteChat(ctx context.Context, chatGUID string) error {
 	return nil
 }
 
-// NewMessageGUID returns a GUID for SendText, for callers that must know it before sending.
-func NewMessageGUID() string { return uuid.NewString() }
+// NewMessageGUID returns a GUID for SendText, for callers that must know it before sending. It
+// is uppercase, as Messages writes GUIDs.
+func NewMessageGUID() string { return strings.ToUpper(uuid.NewString()) }
+
+// ErrMaybeSent is SendText's error when Messages may have sent the text, usually under a GUID of
+// its own (openclaw/imsg#385): sending it again could send it twice.
+var ErrMaybeSent = errors.New("messages may have sent this text")
 
 // SendText sends text to a chat as a new message with the given GUID from NewMessageGUID.
 func (s *Service) SendText(ctx context.Context, chatGUID, guid, text, replyTo string) error {
-	return s.client.SendTracked(ctx, chatGUID, guid, text, replyTo)
+	err := s.client.SendTracked(ctx, chatGUID, guid, text, replyTo)
+	if imsg.RetryUnsafe(err) {
+		return fmt.Errorf("%w: %w", ErrMaybeSent, err)
+	}
+	return err
 }
 
 // Chat looks up a chat by GUID.

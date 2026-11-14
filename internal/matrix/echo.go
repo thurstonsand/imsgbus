@@ -10,9 +10,9 @@ import (
 // echoWindow is how long after a send Messages' own row for it can still turn up.
 const echoWindow = time.Minute
 
-// sends holds the texts Beeper sent until Messages records them. imsg's send.tracked can
-// report success while Messages saves the message under a GUID of its own, and that row would
-// otherwise come back into Beeper as a second copy of the message (openclaw/imsg#385).
+// sends holds the texts Beeper sent until Messages records them. A text send stays pending in
+// Beeper until its row comes back from the watch feed, because Messages can save it under a GUID
+// of its own (openclaw/imsg#385): that row's GUID becomes the message's ID.
 type sends struct {
 	lock    sync.Mutex
 	pending []sentText
@@ -35,14 +35,15 @@ func (s *sends) remove(guid string) {
 	s.take(func(p sentText) bool { return p.guid == guid })
 }
 
-// echoOf is the GUID Beeper sent a message from me under, when Messages recorded that send under
-// guid instead. A message under the GUID it was sent with is no echo to drop.
+// echoOf is the GUID Beeper sent a message from me under, which Messages recorded as guid, or
+// empty when the message isn't a send from Beeper. A send Messages kept the GUID of matches by
+// GUID, and one it saved under a GUID of its own by chat and text.
 func (s *sends) echoOf(chatGUID, guid, text string, at time.Time) string {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	s.pending = slices.DeleteFunc(s.pending, func(p sentText) bool { return at.Sub(p.at) > echoWindow })
-	if _, ok := s.take(func(p sentText) bool { return strings.EqualFold(p.guid, guid) }); ok {
-		return ""
+	if sent, ok := s.take(func(p sentText) bool { return strings.EqualFold(p.guid, guid) }); ok {
+		return sent.guid
 	}
 	sent, _ := s.take(func(p sentText) bool { return p.chatGUID == chatGUID && p.text == text })
 	return sent.guid

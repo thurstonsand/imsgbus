@@ -29,6 +29,22 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("imsg: %s (%d): %s", e.Message, e.Code, e.Data)
 }
 
+// RetryUnsafe says whether err is imsg reporting that a send may have gone out, so sending it
+// again could send it twice.
+func RetryUnsafe(err error) bool {
+	rpcErr, ok := errors.AsType[*Error](err)
+	if !ok {
+		return false
+	}
+	var data struct {
+		RetrySafe *bool `json:"retry_safe"`
+	}
+	if json.Unmarshal(rpcErr.Data, &data) != nil || data.RetrySafe == nil {
+		return false
+	}
+	return !*data.RetrySafe
+}
+
 // maxInFlight keeps requests queued here rather than refused: imsg rpc answers "Server busy" to
 // anything beyond its 128 outstanding requests, and a resync of every chat sends far more.
 const maxInFlight = 64

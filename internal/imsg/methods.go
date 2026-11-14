@@ -201,8 +201,8 @@ func (c *Client) Typing(ctx context.Context, chatGUID string, typing bool) error
 	return c.Call(ctx, "typing", map[string]any{"chat_guid": chatGUID, "typing": typing}, nil)
 }
 
-// SendTracked sends text to a chat with a caller-chosen UUID, which imsg lowercases and uses as
-// the message GUID.
+// SendTracked sends text to a chat with a caller-chosen UUID, which imsg uses as the message GUID
+// in Apple's uppercase form. Its error is RetryUnsafe when Messages may have sent the text anyway.
 func (c *Client) SendTracked(ctx context.Context, chatGUID, attemptID, text, replyTo string) error {
 	params := map[string]any{"chat_guid": chatGUID, "text": text, "attempt_id": attemptID}
 	if replyTo != "" {

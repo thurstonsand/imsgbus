@@ -2,6 +2,7 @@ package matrix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,27 +26,41 @@ func (c *Client) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMe
 	if msg.ReplyTo != nil {
 		replyGUID = string(msg.ReplyTo.ID)
 	}
-	var guid string
 	switch msg.Content.MsgType {
 	case event.MsgText, event.MsgNotice, event.MsgEmote:
-		guid = core.NewMessageGUID()
-		c.sends.add(chatGUID, guid, msg.Content.Body, time.Now())
-		if err = c.core.SendText(ctx, chatGUID, guid, msg.Content.Body, replyGUID); err != nil {
-			c.sends.remove(guid)
-			return nil, err
-		}
+		return c.sendText(ctx, msg, chatGUID, replyGUID)
 	case event.MsgImage, event.MsgVideo, event.MsgAudio, event.MsgFile:
-		if guid, err = c.sendFile(ctx, msg, chatGUID, replyGUID); err != nil {
+		guid, err := c.sendFile(ctx, msg, chatGUID, replyGUID)
+		if err != nil {
 			return nil, err
 		}
+		return &bridgev2.MatrixMessageResponse{DB: &database.Message{
+			ID:        networkid.MessageID(guid),
+			SenderID:  networkid.UserID(c.login.RemoteName),
+			Timestamp: time.Now(),
+		}}, nil
 	default:
 		return nil, bridgev2.ErrUnsupportedMessageType
 	}
-	return &bridgev2.MatrixMessageResponse{DB: &database.Message{
-		ID:        networkid.MessageID(guid),
-		SenderID:  networkid.UserID(c.login.RemoteName),
-		Timestamp: time.Now(),
-	}}, nil
+}
+
+// sendText sends a Matrix text and leaves it pending until Messages' row for it comes back, which
+// gives the message its ID; see sends. A send Messages may have made anyway stays pending too, and
+// shows as possibly undelivered if no row turns up.
+func (c *Client) sendText(ctx context.Context, msg *bridgev2.MatrixMessage, chatGUID, replyGUID string) (*bridgev2.MatrixMessageResponse, error) {
+	guid := core.NewMessageGUID()
+	txn := networkid.TransactionID(guid)
+	msg.AddPendingToSave(&database.Message{SenderID: networkid.UserID(c.login.RemoteName)}, txn, nil)
+	c.sends.add(chatGUID, guid, msg.Content.Body, time.Now())
+	err := c.core.SendText(ctx, chatGUID, guid, msg.Content.Body, replyGUID)
+	if errors.Is(err, core.ErrMaybeSent) {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("guid", guid).Msg("Messages may have sent a text from Beeper; waiting for its row")
+	} else if err != nil {
+		msg.RemovePending(txn)
+		c.sends.remove(guid)
+		return nil, err
+	}
+	return &bridgev2.MatrixMessageResponse{Pending: true}, nil
 }
 
 // sendFile sends a Matrix file to a chat, then its caption as a message of its own, as Messages
@@ -79,7 +94,7 @@ func (c *Client) sendFile(ctx context.Context, msg *bridgev2.MatrixMessage, chat
 		captionGUID := core.NewMessageGUID()
 		msg.AddPendingToIgnore(networkid.TransactionID(captionGUID))
 		c.sends.add(chatGUID, captionGUID, caption, time.Now())
-		if err = c.core.SendText(ctx, chatGUID, captionGUID, caption, ""); err != nil {
+		if err = c.core.SendText(ctx, chatGUID, captionGUID, caption, ""); err != nil && !errors.Is(err, core.ErrMaybeSent) {
 			msg.RemovePending(networkid.TransactionID(captionGUID))
 			c.sends.remove(captionGUID)
 			zerolog.Ctx(ctx).Err(err).Msg("Sent the file but not its caption")

@@ -39,7 +39,7 @@ mise run clean          # Remove build artifacts
 ## Code style
 
 - Pass imsg the parameters it documents and nothing else: it rejects unknown ones.
-- A message GUID imsgbus creates is a lowercase UUID, passed to `send.tracked` as `attempt_id`, so a Matrix event's transaction and the echo from the watch feed share it.
+- A message GUID imsgbus creates is an uppercase UUID, as Messages writes them, passed to `send.tracked` as `attempt_id`. A text from Beeper stays pending under it as its transaction until the watch feed brings back Messages' row for it, matched by GUID or, when Messages saved it under a GUID of its own, by chat and text.
 
 ## Changelog
 

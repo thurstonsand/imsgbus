@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A text sent from Beeper shows as sent once Messages records it, and takes the GUID Messages recorded it under. When imsg can't confirm a send but Messages may have made it anyway (imsg's `retry_safe: false`), the text waits for Messages' row instead of failing in Beeper, where trying it again would send it twice; if Messages hasn't recorded it after a minute, Beeper says it may not have been sent. This readies the bridge for imsg's stricter `send.tracked` (openclaw/imsg#385).
+
 ## [0.2.13] - 2026-11-08
 
 ### Changed
