@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-11-16
+
 ### Fixed
 
 - A 👍, 👎 or ❓ tapback from Beeper stays the reaction Beeper sent, rather than being removed and sent again when Messages records it: tapbacks both ways now carry Matrix's emoji variation selectors, which Messages leaves off.
