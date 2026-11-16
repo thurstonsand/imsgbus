@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/variationselector"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -136,11 +137,12 @@ func (c *Client) HandleMatrixTyping(ctx context.Context, typing *bridgev2.Matrix
 	return c.core.SetTyping(ctx, chatGUID, typing.IsTyping)
 }
 
-// PreHandleMatrixReaction keeps one tapback per person per message, as iMessage does.
+// PreHandleMatrixReaction keeps one tapback per person per message, as iMessage does, under its
+// emoji in Matrix's form: Messages reports 👍 bare where Beeper sends it with a variation selector.
 func (c *Client) PreHandleMatrixReaction(_ context.Context, msg *bridgev2.MatrixReaction) (bridgev2.MatrixReactionPreResponse, error) {
 	return bridgev2.MatrixReactionPreResponse{
 		SenderID:     networkid.UserID(c.login.RemoteName),
-		Emoji:        msg.Content.RelatesTo.Key,
+		Emoji:        variationselector.Add(msg.Content.RelatesTo.Key),
 		MaxReactions: 1,
 	}, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/nyaruka/phonenumbers"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/jsontime"
+	"go.mau.fi/util/variationselector"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -258,7 +259,8 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 				c.cursor.finish(ctx, evt.RowID)
 			},
 			TargetMessage: networkid.MessageID(evt.Target),
-			Emoji:         evt.Emoji,
+			// The form PreHandleMatrixReaction keeps, so the echo of a tapback from Beeper matches it.
+			Emoji: variationselector.Add(evt.Emoji),
 		})
 	case core.Edit:
 		c.login.QueueRemoteEvent(&simplevent.Message[core.Edit]{
