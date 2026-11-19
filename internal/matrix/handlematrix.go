@@ -110,18 +110,15 @@ func (c *Client) HandleMatrixReadReceipt(ctx context.Context, receipt *bridgev2.
 	log := zerolog.Ctx(ctx).With().Str("event", "read_receipt").Str("chat_guid", string(receipt.Portal.ID)).Logger()
 	read := receipt.ExactMessage
 	if read == nil {
-		// Beeper puts the receipt on the newest event, which can be a tapback; reading it reads
-		// every message before it.
-		reaction, err := c.login.Bridge.DB.Reaction.GetByMXID(ctx, receipt.EventID)
-		if err != nil {
+		// Beeper puts the receipt on the room's newest event, which can be a tapback or a room
+		// update; reading it reads every message before it.
+		var err error
+		if read, err = c.login.Bridge.DB.Message.GetLastNonFakePartAtOrBeforeTime(ctx, receipt.Portal.PortalKey, receipt.ReadUpTo); err != nil {
 			return err
 		}
-		if reaction == nil {
-			log.Info().Stringer("event_id", receipt.EventID).Msg("Ignored read receipt from Beeper on an event that is neither a message nor a tapback")
+		if read == nil {
+			log.Info().Stringer("event_id", receipt.EventID).Msg("Ignored read receipt from Beeper in a room with no bridged message before it")
 			return nil
-		}
-		if read, err = c.login.Bridge.DB.Message.GetLastNonFakePartAtOrBeforeTime(ctx, receipt.Portal.PortalKey, reaction.Timestamp); err != nil || read == nil {
-			return err
 		}
 	}
 	marked, err := c.core.MarkReadThrough(ctx, string(receipt.Portal.ID), string(read.ID))

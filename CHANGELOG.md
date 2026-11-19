@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reading a chat in Beeper marks it read in Messages whatever event Beeper puts the read receipt on. A receipt on a room update, as after the first message from a new sender, was ignored and left the chat unread in Messages and on every other Apple device.
+
 ## [0.2.15] - 2026-11-16
 
 ### Fixed
