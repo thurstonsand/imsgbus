@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-11-20
+
 ### Removed
 
 - The one-time edit of group changes backfilled as unsupported, which ran once under 0.2.17. bridgev2 doesn't count edits from the network, so it would have sent them again on every start.
