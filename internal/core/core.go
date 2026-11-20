@@ -164,23 +164,6 @@ func (s *Service) Watch(ctx context.Context, sinceRowID int64, withFiles bool, h
 	})
 }
 
-// Announced describes the group changes among the messages with the given GUIDs as Watch
-// bridges them, by GUID.
-func (s *Service) Announced(ctx context.Context, guids []string) map[string]Message {
-	messages := make([]Message, len(guids))
-	for i, guid := range guids {
-		messages[i] = Message{GUID: guid}
-	}
-	s.announce(ctx, messages)
-	found := map[string]Message{}
-	for _, m := range messages {
-		if m.Announcement {
-			found[m.GUID] = m
-		}
-	}
-	return found
-}
-
 // announce describes each message that records a change to a group, which imsg reports with
 // neither text nor files, from chat.db.
 func (s *Service) announce(ctx context.Context, messages []Message) {
