@@ -74,6 +74,9 @@ func (c *Client) Connect(ctx context.Context) {
 	if err := c.rekeySenders(ctx); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to move senders to their person")
 	}
+	if err := c.describePlaceholders(ctx); err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to describe group changes bridged as unsupported")
+	}
 	go c.syncChats(ctx)
 	go c.keep(ctx, "message watch", func() error {
 		err := c.core.Watch(ctx, c.cursor.position(), true, func(evt core.Event) { c.handle(ctx, evt) })

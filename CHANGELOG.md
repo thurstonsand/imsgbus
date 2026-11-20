@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Group changes backfilled before 0.2.3, which Beeper still showed as "Unsupported message", are edited once into the description the bridge sends for them now, such as "left the conversation".
+
 ## [0.2.16] - 2026-11-19
 
 ### Fixed
