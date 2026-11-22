@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-11-22
+
 ### Fixed
 
 - A send from Beeper that Messages fails at once shows as failed too. The failure could reach the bridge before Messages' copy of the message did, when there was nothing yet to mark, and the copy then marked it sent.
