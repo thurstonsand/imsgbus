@@ -37,12 +37,6 @@ url = "https://github.com/jdx/jactionlint/releases/download/v2.5.0/jactionlint_2
 url_api = "https://api.github.com/repos/jdx/jactionlint/releases/assets/714298455"
 provenance = "github-attestations"
 
-[tools."aqua:jdx/jactionlint"."platforms.macos-x64"]
-checksum = "sha256:f8f10def21260aa9515974f0aa145f5a6741efd60efe1f880c8c6f53a4ba676c"
-url = "https://github.com/jdx/jactionlint/releases/download/v2.5.0/jactionlint_2.5.0_darwin_amd64.tar.gz"
-url_api = "https://api.github.com/repos/jdx/jactionlint/releases/assets/714298456"
-provenance = "github-attestations"
-
 [tools."aqua:jdx/jactionlint"."platforms.windows-x64"]
 checksum = "sha256:6f6202d6fc476cbe3978c7dd2349c881cfcfa98257593cb2f1bde87004f054c6"
 url = "https://github.com/jdx/jactionlint/releases/download/v2.5.0/jactionlint_2.5.0_windows_amd64.zip"
@@ -73,10 +67,6 @@ url = "https://dl.google.com/go/go1.27.3.linux-amd64.tar.gz"
 [tools.go."platforms.macos-arm64"]
 checksum = "sha256:dd3908cf20959d798c1e06ebe5b72213f0505ce01373b40ce3110975a6cd99c2"
 url = "https://dl.google.com/go/go1.27.3.darwin-arm64.tar.gz"
-
-[tools.go."platforms.macos-x64"]
-checksum = "sha256:b6f8e931e4ab497fcde6da8ae4499a58f9d258e55c8a80824a516eae5950a750"
-url = "https://dl.google.com/go/go1.27.3.darwin-amd64.tar.gz"
 
 [tools.go."platforms.windows-x64"]
 checksum = "sha256:f26081f438319757f8a1b46d7d0b2c5ec7583d4038e485e0aa725cfde7885fff"
@@ -117,12 +107,6 @@ url = "https://github.com/golangci/golangci-lint/releases/download/v2.15.0/golan
 url_api = "https://api.github.com/repos/golangci/golangci-lint/releases/assets/647132534"
 provenance = "github-attestations"
 
-[tools.golangci-lint."platforms.macos-x64"]
-checksum = "sha256:767b899a28285e88ded2823d5dcc4bc5ef681173eb2d80f029a7b17ee4ece3b8"
-url = "https://github.com/golangci/golangci-lint/releases/download/v2.15.0/golangci-lint-2.15.0-darwin-amd64.tar.gz"
-url_api = "https://api.github.com/repos/golangci/golangci-lint/releases/assets/647132753"
-provenance = "github-attestations"
-
 [tools.golangci-lint."platforms.windows-x64"]
 checksum = "sha256:cd7ea6063c95de245e17e5246e42bdc14bb221792c429dbd239ab3a6ade6ca6a"
 url = "https://github.com/golangci/golangci-lint/releases/download/v2.15.0/golangci-lint-2.15.0-windows-amd64.zip"
@@ -159,12 +143,6 @@ url_api = "https://api.github.com/repos/goreleaser/goreleaser/releases/assets/66
 provenance = "github-attestations"
 
 [tools.goreleaser."platforms.macos-arm64"]
-checksum = "sha256:21adceff6e676ef63497fc129983f8c454e5a46ec0125b905cba0f83e7879722"
-url = "https://github.com/goreleaser/goreleaser/releases/download/v2.19.0/goreleaser_Darwin_all.tar.gz"
-url_api = "https://api.github.com/repos/goreleaser/goreleaser/releases/assets/667102941"
-provenance = "github-attestations"
-
-[tools.goreleaser."platforms.macos-x64"]
 checksum = "sha256:21adceff6e676ef63497fc129983f8c454e5a46ec0125b905cba0f83e7879722"
 url = "https://github.com/goreleaser/goreleaser/releases/download/v2.19.0/goreleaser_Darwin_all.tar.gz"
 url_api = "https://api.github.com/repos/goreleaser/goreleaser/releases/assets/667102941"
@@ -242,10 +220,6 @@ url = "https://unofficial-builds.nodejs.org/download/release/v26.13.0/node-v26.1
 checksum = "sha256:d38bd5e5a2ddce6bbb5ce45e46e208337da4d51fffe611e567fd32073d6439f6"
 url = "https://nodejs.org/dist/v26.13.0/node-v26.13.0-darwin-arm64.tar.gz"
 
-[tools.node."platforms.macos-x64"]
-checksum = "sha256:525c9b29bb0263d687de60a4cec0e2a6db876a8eb032369e5795eca71e7c358e"
-url = "https://nodejs.org/dist/v26.13.0/node-v26.13.0-darwin-x64.tar.gz"
-
 [tools.node."platforms.windows-x64"]
 checksum = "sha256:dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a"
 url = "https://nodejs.org/dist/v26.13.0/node-v26.13.0-win-x64.zip"
@@ -290,12 +264,6 @@ checksum = "sha256:56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0
 checksum_source = "mise-versions"
 url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.aarch64.tar.xz"
 url_api = "https://api.github.com/repos/koalaman/shellcheck/releases/assets/279056932"
-
-[tools.shellcheck."platforms.macos-x64"]
-checksum = "sha256:3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6"
-checksum_source = "mise-versions"
-url = "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.x86_64.tar.xz"
-url_api = "https://api.github.com/repos/koalaman/shellcheck/releases/assets/279056930"
 
 [tools.shellcheck."platforms.windows-x64"]
 checksum = "sha256:8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e"
