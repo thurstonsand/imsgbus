@@ -30,6 +30,21 @@ func LastRowID(ctx context.Context, path string) (int64, error) {
 	return row, db.QueryRowContext(ctx, "SELECT coalesce(max(ROWID), 0) FROM message").Scan(&row)
 }
 
+// SendFailed is whether Messages couldn't send the message with the given GUID.
+func SendFailed(ctx context.Context, path, guid string) (bool, error) {
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = db.Close() }()
+	var failed bool
+	err = db.QueryRowContext(ctx, "SELECT error <> 0 FROM message WHERE guid = ?", guid).Scan(&failed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("%w: %s", ErrNoMessage, guid)
+	}
+	return failed, err
+}
+
 // MessageChat returns the GUID of the chat a message is in, and the message's files.
 func MessageChat(ctx context.Context, path, guid string) (string, []File, error) {
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")

@@ -689,6 +689,11 @@ func (s *Service) Search(ctx context.Context, q search.Query) (search.Results, e
 	return s.search.Search(ctx, q)
 }
 
+// SendFailed is whether Messages couldn't send the message with the given GUID.
+func (s *Service) SendFailed(ctx context.Context, guid string) (bool, error) {
+	return chatdb.SendFailed(ctx, s.chatDB, guid)
+}
+
 // MessageChat returns the GUID of the chat a message is in, and the message's files.
 func (s *Service) MessageChat(ctx context.Context, guid string) (string, []chatdb.File, error) {
 	return chatdb.MessageChat(ctx, s.chatDB, guid)

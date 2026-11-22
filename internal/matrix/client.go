@@ -215,9 +215,10 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 	case core.Message:
 		// A send from Beeper is pending under the GUID it was sent with, which its row may not have.
 		txn := evt.GUID
+		fromBeeper := false
 		if evt.IsFromMe {
 			if sent := c.sends.echoOf(evt.ChatGUID, evt.GUID, evt.Text, evt.Time); sent != "" {
-				txn = sent
+				txn, fromBeeper = sent, true
 				if sent != evt.GUID {
 					c.login.Log.Info().Str("chat_guid", evt.ChatGUID).Str("sent_guid", sent).Str("guid", evt.GUID).Msg("Messages recorded a send from Beeper under another GUID")
 				}
@@ -236,6 +237,9 @@ func (c *Client) handle(ctx context.Context, evt core.Event) {
 			StreamOrder:  evt.RowID,
 			PostHandleFunc: func(ctx context.Context, _ *bridgev2.Portal) {
 				c.cursor.finish(ctx, evt.RowID)
+				if fromBeeper {
+					c.checkSent(ctx, evt.ChatGUID, evt.GUID)
+				}
 			},
 			ID:                 networkid.MessageID(evt.GUID),
 			TransactionID:      networkid.TransactionID(txn),
@@ -373,7 +377,7 @@ func (c *Client) removeMovedTapback(ctx context.Context, evt core.Tapback) {
 
 func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 	if r.Kind == core.Failed {
-		c.markFailed(ctx, r)
+		c.markFailed(ctx, r.ChatGUID, r.GUID)
 		return
 	}
 	sender := c.self()
@@ -403,17 +407,30 @@ func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 	})
 }
 
+// checkSent marks a send from Beeper failed if Messages already failed it by the time its echo was
+// saved. The chat.db watch can report that failure before the echo gives the message a record to
+// mark, and then markFailed finds nothing; a failure after the save is the watch's to report.
+func (c *Client) checkSent(ctx context.Context, chatGUID, guid string) {
+	failed, err := c.core.SendFailed(ctx, guid)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Str("chat_guid", chatGUID).Str("guid", guid).Msg("Failed to check whether Messages sent a message")
+	} else if failed {
+		c.markFailed(ctx, chatGUID, guid)
+	}
+}
+
 // markFailed shows a message Messages couldn't send as failed in Beeper, which marked it sent when
 // Messages took it.
-func (c *Client) markFailed(ctx context.Context, r core.Receipt) {
-	log := zerolog.Ctx(ctx).With().Str("event", "send_failed").Str("chat_guid", r.ChatGUID).Str("guid", r.GUID).Logger()
-	parts, err := c.login.Bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(r.GUID))
+func (c *Client) markFailed(ctx context.Context, chatGUID, guid string) {
+	log := zerolog.Ctx(ctx).With().Str("event", "send_failed").Str("chat_guid", chatGUID).Str("guid", guid).Logger()
+	parts, err := c.login.Bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(guid))
 	if err != nil {
 		log.Err(err).Msg("Failed to look up a message Messages couldn't send")
 		return
 	}
 	if len(parts) == 0 {
-		log.Warn().Msg("Messages couldn't send a message the bridge hasn't bridged")
+		// A send from Beeper whose echo isn't saved yet; checkSent marks it once it is.
+		log.Info().Msg("Messages couldn't send a message the bridge hasn't saved yet")
 		return
 	}
 	portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, parts[0].Room)
