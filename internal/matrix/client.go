@@ -372,6 +372,10 @@ func (c *Client) removeMovedTapback(ctx context.Context, evt core.Tapback) {
 }
 
 func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
+	if r.Kind == core.Failed {
+		c.markFailed(ctx, r)
+		return
+	}
 	sender := c.self()
 	if r.IsFromMe {
 		other, ok := otherHandle(r.ChatGUID)
@@ -397,6 +401,42 @@ func (c *Client) handleReceipt(ctx context.Context, r core.Receipt) {
 		ReadUpTo:            r.Time,
 		ReadUpToStreamOrder: r.RowID,
 	})
+}
+
+// markFailed shows a message Messages couldn't send as failed in Beeper, which marked it sent when
+// Messages took it.
+func (c *Client) markFailed(ctx context.Context, r core.Receipt) {
+	log := zerolog.Ctx(ctx).With().Str("event", "send_failed").Str("chat_guid", r.ChatGUID).Str("guid", r.GUID).Logger()
+	parts, err := c.login.Bridge.DB.Message.GetAllPartsByID(ctx, c.login.ID, networkid.MessageID(r.GUID))
+	if err != nil {
+		log.Err(err).Msg("Failed to look up a message Messages couldn't send")
+		return
+	}
+	if len(parts) == 0 {
+		log.Warn().Msg("Messages couldn't send a message the bridge hasn't bridged")
+		return
+	}
+	portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, parts[0].Room)
+	if err != nil || portal == nil || portal.MXID == "" {
+		log.Err(err).Msg("Failed to find the room of a message Messages couldn't send")
+		return
+	}
+	log.Warn().Msg("Messages couldn't send a message")
+	for _, part := range parts {
+		c.login.Bridge.Matrix.SendMessageStatus(ctx, &bridgev2.MessageStatus{
+			Status:      event.MessageStatusFail,
+			ErrorReason: event.MessageStatusNetworkError,
+			Message:     "Messages on the Mac couldn't send this",
+			IsCertain:   true,
+		}, &bridgev2.MessageStatusEventInfo{
+			RoomID:        portal.MXID,
+			SourceEventID: part.MXID,
+			EventType:     event.EventMessage,
+			Sender:        part.SenderMXID,
+
+			IsSourceEventDoublePuppeted: part.IsDoublePuppeted,
+		})
+	}
 }
 
 // typingTimeout is how long Beeper shows someone typing without hearing they stopped.

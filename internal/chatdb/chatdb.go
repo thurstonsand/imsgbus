@@ -1,5 +1,5 @@
 // Package chatdb reads Messages' chat.db, read-only, for what imsg doesn't report: when a message
-// was delivered and when it was read, on either side, when a chat was deleted or came back, and
+// was delivered and when it was read, on either side, when yours failed to send, when a chat was deleted or came back, and
 // what change to a group a row records.
 package chatdb
 
@@ -23,9 +23,12 @@ const (
 	Delivered Kind = iota
 	// Read means the recipient read your message, or you read theirs on any of your devices.
 	Read
+	// Failed means Messages couldn't send your message, such as an SMS or RCS message the iPhone
+	// doesn't forward for this Mac. Messages takes the message first, so it already looks sent.
+	Failed
 )
 
-// Change is a message's delivery or read state moving forward.
+// Change is a message's delivery, read or send state moving forward.
 type Change struct {
 	Kind     Kind
 	RowID    int64
@@ -57,6 +60,7 @@ type row struct {
 	delivered int64
 	isRead    bool
 	read      int64
+	failed    bool
 }
 
 // settled rows can't change in a way worth reporting any more.
@@ -64,7 +68,7 @@ func (r row) settled(cutoff int64) bool {
 	return r.isRead || (r.isFromMe && r.date < cutoff)
 }
 
-// Watch reports every delivery and read of a recent message until ctx ends. Changes that happen
+// Watch reports every delivery, read and failed send of a recent message until ctx ends. Changes that happen
 // while nothing watches are not reported.
 func Watch(ctx context.Context, path string, report func(Change)) error {
 	w := &watch{report: report, pending: make(map[int64]row)}
@@ -137,7 +141,7 @@ type watch struct {
 	maxRow  int64
 }
 
-const rowColumns = `m.ROWID, m.guid, c.guid, m.is_from_me, m.date, m.date_delivered, m.is_read, m.date_read
+const rowColumns = `m.ROWID, m.guid, c.guid, m.is_from_me, m.date, m.date_delivered, m.is_read, m.date_read, m.error <> 0
 	FROM message m
 	JOIN chat_message_join j ON j.message_id = m.ROWID
 	JOIN chat c ON c.ROWID = j.chat_id`
@@ -180,6 +184,9 @@ func (w *watch) update(id int64, was, now row) {
 	if now.isFromMe && was.delivered == 0 && now.delivered != 0 {
 		w.report(Change{Kind: Delivered, RowID: id, GUID: now.guid, ChatGUID: now.chatGUID, IsFromMe: true, Time: appleTime(now.delivered)})
 	}
+	if now.isFromMe && !was.failed && now.failed {
+		w.report(Change{Kind: Failed, RowID: id, GUID: now.guid, ChatGUID: now.chatGUID, IsFromMe: true, Time: time.Now()})
+	}
 	if !was.isRead && now.isRead {
 		at := time.Now()
 		if now.read != 0 {
@@ -203,7 +210,7 @@ func each(ctx context.Context, conn *sql.Conn, query string, args []any, fn func
 	for rows.Next() {
 		var id int64
 		var r row
-		if err := rows.Scan(&id, &r.guid, &r.chatGUID, &r.isFromMe, &r.date, &r.delivered, &r.isRead, &r.read); err != nil {
+		if err := rows.Scan(&id, &r.guid, &r.chatGUID, &r.isFromMe, &r.date, &r.delivered, &r.isRead, &r.read, &r.failed); err != nil {
 			return err
 		}
 		fn(id, r)

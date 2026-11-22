@@ -315,10 +315,11 @@ type ReceiptKind = chatdb.Kind
 const (
 	Delivered = chatdb.Delivered
 	Read      = chatdb.Read
+	Failed    = chatdb.Failed
 )
 
 // Receipt is a message's delivery or read: of your message by its recipient, or of an incoming
-// message by you on any device.
+// message by you on any device. A Failed one is your message that Messages couldn't send.
 type Receipt struct {
 	Kind     ReceiptKind
 	RowID    int64
@@ -329,7 +330,7 @@ type Receipt struct {
 	Time     time.Time
 }
 
-// WatchReceipts calls handle for every delivery and read of a recent message until ctx ends.
+// WatchReceipts calls handle for every delivery, read and failed send of a recent message until ctx ends.
 func (s *Service) WatchReceipts(ctx context.Context, handle func(Receipt)) error {
 	return chatdb.Watch(ctx, s.chatDB, func(c chatdb.Change) {
 		handle(Receipt{Kind: c.Kind, RowID: c.RowID, GUID: c.GUID, ChatGUID: c.ChatGUID, IsFromMe: c.IsFromMe, Time: c.Time})

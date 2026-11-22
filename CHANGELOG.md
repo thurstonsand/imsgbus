@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A message Messages couldn't send, such as an SMS or RCS message while the iPhone doesn't forward texts to the Mac, shows as failed in Beeper. Messages takes the message before it sends it, so Beeper had marked it sent.
+
 ## [0.2.18] - 2026-11-20
 
 ### Removed

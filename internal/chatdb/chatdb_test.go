@@ -29,7 +29,7 @@ func fixture(t *testing.T) (string, *sql.DB) {
 	exec(t, db, `CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER)`)
 	exec(t, db, `CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, is_from_me INTEGER,
 		date INTEGER, date_delivered INTEGER DEFAULT 0, is_read INTEGER DEFAULT 0,
-		date_read INTEGER DEFAULT 0, is_finished INTEGER DEFAULT 1)`)
+		date_read INTEGER DEFAULT 0, is_finished INTEGER DEFAULT 1, error INTEGER DEFAULT 0)`)
 	exec(t, db, `INSERT INTO chat VALUES (1, 'any;-;+15550001111')`)
 	return path, db
 }
@@ -60,6 +60,8 @@ func TestWatchReportsDeliveriesAndReadsOnce(t *testing.T) {
 	insert(t, db, 2, false, now.Add(-time.Hour), 0, 0)               // received, unread
 	insert(t, db, 3, false, now.Add(-time.Hour), 0, readAt)          // received and already read
 	insert(t, db, 4, true, now.Add(-30*24*time.Hour), apple(now), 0) // too old to track
+	insert(t, db, 6, true, now.Add(-time.Minute), 0, 0)              // sent, fails below
+	insert(t, db, 7, false, now.Add(-time.Minute), 0, 0)             // received, error set below
 
 	changes := make(chan chatdb.Change, 16)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -70,14 +72,15 @@ func TestWatchReportsDeliveriesAndReadsOnce(t *testing.T) {
 
 	exec(t, db, `UPDATE message SET date_delivered = ? WHERE ROWID IN (1, 4)`, readAt)
 	exec(t, db, `UPDATE message SET is_read = 1, date_read = ? WHERE ROWID IN (1, 2, 3)`, readAt)
-	insert(t, db, 5, true, now, readAt, 0) // delivered before the watcher first sees it
+	insert(t, db, 10, true, now, readAt, 0) // delivered before the watcher first sees it
+	exec(t, db, `UPDATE message SET error = 4 WHERE ROWID IN (6, 7)`)
 
-	want := []string{"delivered g1 from-me", "read g1 from-me", "read g2 to-me", "delivered g5 from-me"}
+	want := []string{"delivered g1 from-me", "read g1 from-me", "read g2 to-me", "delivered g10 from-me", "failed g6 from-me"}
 	got := map[string]bool{}
 	for range want {
 		select {
 		case c := <-changes:
-			kind := map[chatdb.Kind]string{chatdb.Delivered: "delivered", chatdb.Read: "read"}[c.Kind]
+			kind := map[chatdb.Kind]string{chatdb.Delivered: "delivered", chatdb.Read: "read", chatdb.Failed: "failed"}[c.Kind]
 			side := map[bool]string{true: "from-me", false: "to-me"}[c.IsFromMe]
 			key := fmt.Sprintf("%s %s %s", kind, c.GUID, side)
 			if got[key] {
@@ -98,15 +101,15 @@ func TestWatchReportsDeliveriesAndReadsOnce(t *testing.T) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	}
-	exec(t, db, `UPDATE message SET is_read = 1, date_read = ? WHERE ROWID = 5`, readAt)
+	exec(t, db, `UPDATE message SET is_read = 1, date_read = ? WHERE ROWID = 10`, readAt)
 	exec(t, db, `UPDATE message SET is_read = 1 WHERE ROWID = 4`)
 	select {
 	case c := <-changes:
-		if c.GUID != "g5" || c.Kind != chatdb.Read {
+		if c.GUID != "g10" || c.Kind != chatdb.Read {
 			t.Fatalf("unexpected %+v", c)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("read of g5 not reported")
+		t.Fatal("read of g10 not reported")
 	}
 	select {
 	case c := <-changes:
