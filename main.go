@@ -30,7 +30,7 @@ func main() {
 		Name:        "imsgbus",
 		Description: "One Mac's iMessage, served to Beeper over Matrix and to agents over MCP",
 		URL:         "https://github.com/thurstonsand/imsgbus",
-		Version:     "0.2.20",
+		Version:     "0.3.0",
 		Connector:   connector,
 	}
 	m.InitVersion(Tag, Commit, BuildTime)
