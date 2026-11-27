@@ -3,9 +3,16 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/rs/zerolog"
+	"go.mau.fi/util/exzerolog"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 
+	"github.com/thurstonsand/imsgbus/internal/core"
 	"github.com/thurstonsand/imsgbus/internal/matrix"
 	"github.com/thurstonsand/imsgbus/internal/mcp"
 )
@@ -26,17 +33,54 @@ func main() {
 		Version:     "0.2.20",
 		Connector:   connector,
 	}
-	// The Matrix frontend owns the process through mxmain; the others start once it runs.
-	m.PostStart = func() {
-		ctx := m.Log.WithContext(context.Background())
-		service := connector.Core()
-		go service.RunIndex(ctx)
-		go service.RunHeartbeat(ctx)
-		go func() {
-			err := mcp.Serve(ctx, connector.Config.MCP.Listen, connector.Config.MCP.Token, m.Version, service)
-			m.Log.Fatal().Err(err).Msg("MCP server stopped")
-		}()
-	}
 	m.InitVersion(Tag, Commit, BuildTime)
-	m.Run()
+	m.PreInit()
+	cfg := connector.Config
+	switch {
+	case cfg.Matrix.Enabled:
+		// The Matrix frontend owns the process through mxmain, and core with it; the rest start once it runs.
+		m.PostStart = func() { serve(m.Log.WithContext(context.Background()), connector.Core(), cfg, m.Version) }
+		m.Init()
+		m.Start()
+		code := m.WaitForInterrupt()
+		m.Stop()
+		os.Exit(code)
+	case cfg.MCP.Enabled:
+		log, err := m.Config.Logging.Compile()
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "Failed to initialize logger:", err)
+			os.Exit(12)
+		}
+		exzerolog.SetupDefaults(log)
+		log.Info().Str("name", m.Name).Str("version", m.Version).Msg("Starting MCP only; network.matrix.enabled is off")
+		ctx, stop := signal.NotifyContext(log.WithContext(context.Background()), os.Interrupt, syscall.SIGTERM)
+		service, err := core.Open(log.With().Str("component", "core").Logger(), cfg.IMsgPath, cfg.SearchIndex)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to start core")
+		}
+		if err := service.WatchContacts(ctx, func() {}); err != nil {
+			log.Fatal().Err(err).Msg("Failed to watch Contacts")
+		}
+		serve(ctx, service, cfg, m.Version)
+		<-ctx.Done()
+		stop()
+		log.Info().Msg("Interrupt signal received from OS")
+	default:
+		_, _ = fmt.Fprintln(os.Stderr, "Both network.matrix.enabled and network.mcp.enabled are off, so there is nothing to serve")
+		os.Exit(11)
+	}
+}
+
+// serve starts what runs beside the Matrix frontend: the search index, the heartbeat, and MCP when enabled.
+func serve(ctx context.Context, service *core.Service, cfg matrix.Config, version string) {
+	go service.RunIndex(ctx)
+	go service.RunHeartbeat(ctx)
+	if !cfg.MCP.Enabled {
+		return
+	}
+	go func() {
+		if err := mcp.Serve(ctx, cfg.MCP.Listen, cfg.MCP.Token, version, service); err != nil {
+			zerolog.Ctx(ctx).Fatal().Err(err).Msg("MCP server stopped")
+		}
+	}()
 }

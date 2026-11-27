@@ -27,7 +27,7 @@ mise run clean          # Remove build artifacts
 
 ## Layout
 
-- `main.go`: the mxmain host process; it starts the search indexer and the MCP server once the bridge runs.
+- `main.go`: the mxmain host process. It runs the bridge when `network.matrix.enabled` is on and starts the search indexer and, when `network.mcp.enabled` is on, the MCP server once the bridge runs; with the bridge off it starts core and those itself, without Matrix.
 - `internal/imsg`: the JSON-RPC client for one `imsg rpc` child, and typed wrappers for the methods imsgbus calls.
 - `internal/chatdb`: read-only reads of Messages' chat.db for what imsg doesn't report: deliveries and reads, deleted chats, group changes, and every one-on-one chat, from which core gathers the chats of a person's conversation.
 - `internal/contacts`: the contacts catalog, read from the AddressBook stores: names for handles, and handles for names.

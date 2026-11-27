@@ -3,7 +3,12 @@
 imsg_path: /usr/local/bin/imsg
 # The SQLite file of the message search index; imsgbus builds it from Messages on first start.
 search_index: search.db
+# The Beeper bridge. With it off, imsgbus serves MCP alone and never connects to Matrix, so the
+# homeserver, appservice and database sections go unused.
+matrix:
+    enabled: true
 # The MCP server for agents: Streamable HTTP on this address, behind this bearer token.
 mcp:
+    enabled: true
     listen: 127.0.0.1:7380
     token: generate

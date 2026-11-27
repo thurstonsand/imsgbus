@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Beeper bridge and the MCP server can each be turned off: `network.mcp.enabled: false` runs the bridge with no MCP listener, and `network.matrix.enabled: false` serves MCP alone, without connecting to Matrix or needing a registered bridge. Both are on by default, so an existing config keeps serving both.
+
 ## [0.2.20] - 2026-11-22
 
 ### Fixed

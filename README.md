@@ -29,6 +29,8 @@ Then send `login messages` to `@sh-imsgbusbot:beeper.local` in Beeper.
 
 The same process serves MCP over Streamable HTTP at `network.mcp.listen`. Clients send `Authorization: Bearer <network.mcp.token>`; the token is generated on first start. imsgbus needs Full Disk Access for chat.db and the AddressBook stores.
 
+Either frontend can run alone. `network.mcp.enabled: false` runs the bridge with no MCP listener; `network.matrix.enabled: false` serves MCP without connecting to Matrix, so the homeserver, appservice and database sections go unused and the config needs no registration. Both are on by default.
+
 ## Logs
 
 Configure a `json` file writer under `logging` to keep a log worth querying. Each line that records something worth counting has an `event` field:

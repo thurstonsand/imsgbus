@@ -5,8 +5,6 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -17,9 +15,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
-	"github.com/thurstonsand/imsgbus/internal/contacts"
 	"github.com/thurstonsand/imsgbus/internal/core"
-	"github.com/thurstonsand/imsgbus/internal/search"
 )
 
 //go:embed example-config.yaml
@@ -29,9 +25,13 @@ var exampleConfig string
 type Config struct {
 	IMsgPath    string `yaml:"imsg_path"`
 	SearchIndex string `yaml:"search_index"`
-	MCP         struct {
-		Listen string `yaml:"listen"`
-		Token  string `yaml:"token"`
+	Matrix      struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"matrix"`
+	MCP struct {
+		Enabled bool   `yaml:"enabled"`
+		Listen  string `yaml:"listen"`
+		Token   string `yaml:"token"`
 	} `yaml:"mcp"`
 }
 
@@ -44,9 +44,8 @@ type UserLoginMetadata struct {
 type Connector struct {
 	Config Config
 
-	bridge   *bridgev2.Bridge
-	core     *core.Service
-	contacts *contacts.Catalog
+	bridge *bridgev2.Bridge
+	core   *core.Service
 }
 
 var _ bridgev2.NetworkConnector = (*Connector)(nil)
@@ -55,32 +54,11 @@ var _ bridgev2.NetworkConnector = (*Connector)(nil)
 // events can load a login, whose client needs core, before Start runs.
 func (c *Connector) Init(bridge *bridgev2.Bridge) {
 	c.bridge = bridge
-	log := bridge.Log.With().Str("component", "core").Logger()
-	fail := func(err error, msg string) {
-		if err != nil {
-			bridge.Log.Fatal().Err(err).Msg(msg)
-		}
+	service, err := core.Open(bridge.Log.With().Str("component", "core").Logger(), c.Config.IMsgPath, c.Config.SearchIndex)
+	if err != nil {
+		bridge.Log.Fatal().Err(err).Msg("Failed to start core")
 	}
-	home, err := os.UserHomeDir()
-	fail(err, "No home directory to find Messages and Contacts in")
-	ctx := log.WithContext(context.Background())
-	people, err := contacts.Open(ctx, filepath.Join(home, "Library", "Application Support", "AddressBook"))
-	fail(err, "Failed to read Contacts")
-	c.contacts = people
-	index, err := search.OpenFTS5(c.Config.SearchIndex)
-	fail(err, "Failed to open the search index")
-	service, err := core.Start(log, core.Options{
-		IMsgPath: c.Config.IMsgPath,
-		ChatDB:   filepath.Join(home, "Library", "Messages", "chat.db"),
-		Contacts: people,
-		Search:   index,
-	})
-	fail(err, "Failed to start imsg rpc")
 	c.core = service
-	go func() {
-		<-service.Exited()
-		bridge.Log.Fatal().Err(service.Err()).Msg("imsg rpc exited")
-	}()
 }
 
 // Core is the service the connector bridges, for other frontends to share.
@@ -96,7 +74,7 @@ func (c *Connector) Start(ctx context.Context) error {
 			}
 		}
 	}
-	if err := c.contacts.Watch(ctx, *zerolog.Ctx(ctx), reloaded); err != nil {
+	if err := c.core.WatchContacts(ctx, reloaded); err != nil {
 		return fmt.Errorf("watch Contacts: %w", err)
 	}
 	go c.refreshGhosts(ctx)
@@ -161,6 +139,8 @@ func (c *Connector) GetConfig() (string, any, up.Upgrader) {
 	return exampleConfig, &c.Config, up.SimpleUpgrader(func(helper up.Helper) {
 		helper.Copy(up.Str, "imsg_path")
 		helper.Copy(up.Str, "search_index")
+		helper.Copy(up.Bool, "matrix", "enabled")
+		helper.Copy(up.Bool, "mcp", "enabled")
 		helper.Copy(up.Str, "mcp", "listen")
 		if token, ok := helper.Get(up.Str, "mcp", "token"); !ok || token == "generate" {
 			helper.Set(up.Str, random.String(64), "mcp", "token")

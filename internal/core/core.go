@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -86,6 +88,37 @@ type queue struct {
 }
 
 func newQueue() *queue { return &queue{wake: make(chan struct{}, 1)} }
+
+// Open starts the Service on this Mac's own Messages and Contacts, with its search index at
+// searchIndex, and ends the process if the imsg child dies.
+func Open(log zerolog.Logger, imsgPath, searchIndex string) (*Service, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("find Messages and Contacts: %w", err)
+	}
+	people, err := contacts.Open(log.WithContext(context.Background()), filepath.Join(home, "Library", "Application Support", "AddressBook"))
+	if err != nil {
+		return nil, fmt.Errorf("read Contacts: %w", err)
+	}
+	index, err := search.OpenFTS5(searchIndex)
+	if err != nil {
+		return nil, fmt.Errorf("open the search index: %w", err)
+	}
+	s, err := Start(log, Options{
+		IMsgPath: imsgPath,
+		ChatDB:   filepath.Join(home, "Library", "Messages", "chat.db"),
+		Contacts: people,
+		Search:   index,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("start imsg rpc: %w", err)
+	}
+	go func() {
+		<-s.Exited()
+		log.Fatal().Err(s.Err()).Msg("imsg rpc exited")
+	}()
+	return s, nil
+}
 
 // Start spawns imsg.
 func Start(log zerolog.Logger, opts Options) (*Service, error) {
@@ -677,6 +710,11 @@ func (s *Service) Identity(handle string) string {
 // Contact is the one contact a handle belongs to.
 func (s *Service) Contact(handle string) (contacts.Contact, bool) {
 	return s.contacts.Lookup(handle)
+}
+
+// WatchContacts reloads Contacts whenever they change, then calls reloaded, until ctx ends.
+func (s *Service) WatchContacts(ctx context.Context, reloaded func()) error {
+	return s.contacts.Watch(ctx, *zerolog.Ctx(ctx), reloaded)
 }
 
 // Person finds the one contact a name means; see contacts.Catalog.Resolve.
